@@ -1,0 +1,32 @@
+//! Rule module tree (one file per rule, matching the Python `rule_gx_*` layout).
+
+pub mod rule_gx_1;
+pub mod rule_gx_1_1;
+pub mod rule_gx_1_2;
+pub mod rule_gx_1_3;
+pub mod rule_gx_1_3_1;
+pub mod rule_gx_1_3_2;
+pub mod rule_gx_1_3_3;
+pub mod rule_gx_1_4;
+pub mod rule_gx_1_4_1;
+pub mod rule_gx_1_4_2;
+pub mod rule_gx_1_4_3;
+pub mod rule_gx_1_5;
+pub mod rule_gx_1_6;
+pub mod rule_gx_1_6_1;
+pub mod rule_gx_1_6_2;
+pub mod rule_gx_1_7;
+pub mod rule_gx_1_7_1;
+pub mod rule_gx_1_7_2;
+pub mod rule_gx_2_0;
+pub mod rule_gx_2_1;
+pub mod rule_gx_2_2;
+pub mod rule_gx_2_3;
+pub mod rule_gx_2_4;
+pub mod rule_gx_2_5;
+pub mod rule_gx_2_6;
+pub mod rule_gx_2_7;
+pub mod rule_gx_2_7_1;
+pub mod rule_gx_2_7_2;
+pub mod rule_gx_2_7_3;
+pub mod rule_gx_2_7_4;

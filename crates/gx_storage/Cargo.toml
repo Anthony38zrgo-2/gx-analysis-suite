@@ -1,0 +1,19 @@
+[package]
+name = "gx_storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gx_core = { path = "../gx_core" }
+regex = { workspace = true }
+rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
+rusqlite_migration = "1.1"
+r2d2 = "0.8"
+r2d2_sqlite = "0.24"
+directories = "5.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+csv = "1.3"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }

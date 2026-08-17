@@ -1,0 +1,17 @@
+# Rust / Cargo
+/target
+**/target
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated artifacts
+*.exe
+*.msi
+dist/

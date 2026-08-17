@@ -1,0 +1,358 @@
+{
+  "rules": [
+    {
+      "rule_id": "GX.1",
+      "name": "Código de programas fuentes - Advertencias",
+      "severity": "WARNING",
+      "description": "Clase estructural para agrupar jerárquicamente las reglas GX.1.x.",
+      "triggers": "DEFAULT",
+      "is_abstract": true,
+      "has_finalize": false,
+      "has_state": false
+    },
+    {
+      "rule_id": "GX.1.1",
+      "name": "Uso de Mayúsculas y Minúsculas",
+      "severity": "WARNING",
+      "description": "Usar Mayúsculas y Minúsculas en uso de variables, variable empieza con &",
+      "triggers": [
+        "&"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": false
+    },
+    {
+      "rule_id": "GX.1.2",
+      "name": "Indentar código",
+      "severity": "WARNING",
+      "description": "Indentar línea de código en uso de For each, If Then Else, Case",
+      "triggers": [
+        "*"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.1.3",
+      "name": "Sintaxis de Sentencias particulares",
+      "severity": "WARNING",
+      "description": "Se debe indicar el índice que se está recorriendo en el For Each. También al finalizar el recorrido indicar el nombre de la tabla. Uso obligatorio la sentencia del DEFINED BY al final del Where",
+      "triggers": [
+        "for each"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.1.3.1",
+      "name": "For Each",
+      "severity": "WARNING",
+      "description": "Se debe indentar el For Each en cada Where y en el cuerpo de código",
+      "triggers": [
+        "*"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.1.3.2",
+      "name": "If",
+      "severity": "WARNING",
+      "description": "Condiciones If debe estar completo con su Else.",
+      "triggers": "DEFAULT",
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.1.3.3",
+      "name": "Case",
+      "severity": "WARNING",
+      "description": "Condiciones Case debe estar completo con su Otherwise.",
+      "triggers": [
+        "case"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.1.4",
+      "name": "Variables",
+      "severity": "WARNING",
+      "description": "Clase estructural para agrupar las reglas de la sección 1.4.",
+      "triggers": "DEFAULT",
+      "is_abstract": true,
+      "has_finalize": false,
+      "has_state": false
+    },
+    {
+      "rule_id": "GX.1.4.1",
+      "name": "Concepto de Variables",
+      "severity": "WARNING",
+      "description": "No se deben reutilizar variables en distintas partes del código",
+      "triggers": [
+        "&",
+        "="
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.1.4.2",
+      "name": "Definición",
+      "severity": "WARNING",
+      "description": "En sentencias de decisión (If, Case) se debe usar variables, no debe usarse atributos.",
+      "triggers": [
+        "if",
+        "case"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": false
+    },
+    {
+      "rule_id": "GX.1.4.3",
+      "name": "Parámetros",
+      "severity": "WARNING",
+      "description": "Definir cada parámetro si es de entrada o de salida, en la sección rule.",
+      "triggers": [
+        "*"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.1.5",
+      "name": "Condiciones Booleanas",
+      "severity": "WARNING",
+      "description": "No es recomendable definir condiciones booleanas con más de tres operandos.",
+      "triggers": [
+        "if",
+        "case"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": false
+    },
+    {
+      "rule_id": "GX.1.6",
+      "name": "Comentarios",
+      "severity": "WARNING",
+      "description": "Clase estructural para agrupar las reglas de la sección 1.6.",
+      "triggers": "DEFAULT",
+      "is_abstract": true,
+      "has_finalize": false,
+      "has_state": false
+    },
+    {
+      "rule_id": "GX.1.6.1",
+      "name": "Comentario en el llamado a Sub Rutinas",
+      "severity": "WARNING",
+      "description": "Antes del llamado con DO poner un comentario",
+      "triggers": [
+        "do"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.1.6.2",
+      "name": "Describir la Sub Rutina",
+      "severity": "WARNING",
+      "description": "En la subrutina Sub en la siguiente fila poner un Comentario de Descripción",
+      "triggers": [
+        "sub"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.1.7",
+      "name": "Modificaciones/Mantenimiento del programa",
+      "severity": "WARNING",
+      "description": "Clase estructural para agrupar las reglas de la sección 1.7.",
+      "triggers": "DEFAULT",
+      "is_abstract": true,
+      "has_finalize": false,
+      "has_state": false
+    },
+    {
+      "rule_id": "GX.1.7.1",
+      "name": "Historia de Cambios",
+      "severity": "WARNING",
+      "description": "En la sección Rules poner: CODIGO INICIATIVA, DESCRIPCION, RESPONSIBLE, VERSION",
+      "triggers": [
+        "*"
+      ],
+      "is_abstract": false,
+      "has_finalize": true,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.1.7.2",
+      "name": "Comentario sobre cambios en filas",
+      "severity": "WARNING",
+      "description": "Cuando se comente una fila con // poner al final un comentario explicativo",
+      "triggers": [
+        "*"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": false
+    },
+    {
+      "rule_id": "GX.2.0",
+      "name": "Mejores Prácticas - Errores",
+      "severity": "ERROR",
+      "description": "Clase estructural para agrupar jerárquicamente las reglas críticas de la sección 2.",
+      "triggers": "DEFAULT",
+      "is_abstract": true,
+      "has_finalize": false,
+      "has_state": false
+    },
+    {
+      "rule_id": "GX.2.1",
+      "name": "Evitar uso de When dentro de cláusulas Where",
+      "severity": "ERROR",
+      "description": "Se debe evitar usar clausula When dentro del condicional Where",
+      "triggers": [
+        "where",
+        "for each"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.2.2",
+      "name": "Evitar palabras de condiciones In, Or o And dentro de cláusulas Where",
+      "severity": "ERROR",
+      "description": "Evitar In, Or, And dentro del Where",
+      "triggers": [
+        "where",
+        "for each"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.2.3",
+      "name": "For Each anidados",
+      "severity": "ERROR",
+      "description": "Evitar For Each / End For solo se permite dos anidaciones",
+      "triggers": "DEFAULT",
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.2.4",
+      "name": "No usar funciones en los comandos Where",
+      "severity": "ERROR",
+      "description": "No usar funciones dentro de clausula Where",
+      "triggers": [
+        "where",
+        "for each"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.2.5",
+      "name": "Variables con código en duro",
+      "severity": "ERROR",
+      "description": "No Asignar variables en código duro dentro del Where",
+      "triggers": [
+        "where",
+        "for each"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.2.6",
+      "name": "Subrutinas",
+      "severity": "ERROR",
+      "description": "Se debe iniciar siempre la variable de salida y una buena práctica es con la palabra clave 'nullvalue'.",
+      "triggers": [
+        "sub"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.2.7",
+      "name": "Iteración y contadores de Variables",
+      "severity": "ERROR",
+      "description": "Clase estructural para agrupar las reglas de la sección 2.7.",
+      "triggers": "DEFAULT",
+      "is_abstract": true,
+      "has_finalize": false,
+      "has_state": false
+    },
+    {
+      "rule_id": "GX.2.7.1",
+      "name": "Iteraciones",
+      "severity": "ERROR",
+      "description": "Evitar Variables sueltas i, j y k en las iteraciones.",
+      "triggers": [
+        "for each",
+        "do"
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.2.7.2",
+      "name": "Contadores",
+      "severity": "ERROR",
+      "description": "Evitar Variables sueltas i, j y k en los contadores.",
+      "triggers": [
+        "&",
+        "="
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": false
+    },
+    {
+      "rule_id": "GX.2.7.3",
+      "name": "Condición",
+      "severity": "ERROR",
+      "description": "Para el caso de la variable condición se recomienda evitar la reutilización.",
+      "triggers": [
+        "&",
+        "="
+      ],
+      "is_abstract": false,
+      "has_finalize": false,
+      "has_state": true
+    },
+    {
+      "rule_id": "GX.2.7.4",
+      "name": "Variables no usadas",
+      "severity": "ERROR",
+      "description": "NO se deben definir variables ni vectores que no se utilicen dentro del programa.",
+      "triggers": [
+        "&"
+      ],
+      "is_abstract": false,
+      "has_finalize": true,
+      "has_state": true
+    }
+  ]
+}

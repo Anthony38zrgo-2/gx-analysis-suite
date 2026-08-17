@@ -1,0 +1,14 @@
+[package]
+name = "gx_engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gx_core = { path = "../gx_core" }
+gx_rules = { path = "../gx_rules" }
+gx_storage = { path = "../gx_storage" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rayon = "1.8"
+rusqlite = { version = "0.31", features = ["bundled"] }

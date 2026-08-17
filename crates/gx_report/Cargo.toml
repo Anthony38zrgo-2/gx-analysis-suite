@@ -1,0 +1,11 @@
+[package]
+name = "gx_report"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gx_core = { path = "../gx_core" }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+directories = "5.0"

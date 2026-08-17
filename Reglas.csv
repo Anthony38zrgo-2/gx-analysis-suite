@@ -1,0 +1,37 @@
+,,,
+,,,
+,,,
+TIPO,TIPO,TIPO,TIPO
+,1. Código de programas fuentes - Advertencias,,Advertencia
+,1.1 Uso de Mayúsculas y Minúsculas  ,"Usar Mayúsculas y Minúsculas en uso de variables, variable empieza con &",Advertencia
+,1.2 Indentar código ,"Indentar línea de código en uso de For each, If Then Else, Case",Advertencia
+,1.3 Sintaxis de Sentencias particulares ,Se debe indicar el índice que se está recorriendo en el For Each. También al finalizar el recorrido indicar el nombre de la tabla. Uso obligatorio la sentencia del DEFINED BY al final del Where,Advertencia
+,1.3.1 “For Each” ,Se debe indentar el For Each en cada Where y en el cuerpo de código,Advertencia
+,1.3.2 “If” ,Condiciones If debe estar completo con su Else.,Advertencia
+,1.3.3 “Case” ,Condiciones Case debe estar completo con su Otherwise.,Advertencia
+,1.4 Variables ,,Advertencia
+,1.4.1 Concepto de Variables,No se deben reutilizar variables en distintas partes del código,Advertencia
+,1.4.2 Definición ,"En sentencias de decisión (If, Case) se debe usar variables, no debe usarse atributos.",Advertencia
+,1.4.3 Parámetros ,"Definir cada parámetro si es de entrada o de salida, en la sección “rule‟. Por tanto debe tener In: o Out:.",Advertencia
+,1.5 Condiciones Booleanas ,"No es recomendable definir condiciones booleanas con más de tres operandos, ya que no es natural la lectura de ANDs y ORs anidados. ",Advertencia
+,1.6 Comentarios ,,Advertencia
+,1.6.1 Comentario en el llamado a Sub Rutinas,Antes del llamado con DO poner un cometario,Advertencia
+,1.6.2 Describir la Sub Rutina  ,En la subrutina Sub en la siguiente fila poner un Comentario de Descripción,Advertencia
+,1.7 Modificaciones/Mantenimiento del programa ,,Advertencia
+,1.7.1 Historia de Cambios,"En la sección Rules poner: CODIGO INICIATIVA, DESCRIPCION, RESPONSIBLE, VERSION ",Advertencia
+,1.7.2 Comentario sobre cambios en filas,Cuando se comente un a fila con // poner al final un comentario con //,Advertencia
+,2.0 Mejores Prácticas - Errores,,Error
+,2.1 Evitar uso de When dentro de cláusulas Where,Se debe evitar usar clausula When dentro del condicional Where ,Error
+,"2.2 Evitar palabras de condiciones In, Or o And dentro de cláusulas Where","Evitar In, Or, And dentro del Where",Error
+,2.3  For Each anidados,Evitar For Each / End For solo  se permite dos anidaciones,Error
+,2.4 No usar funciones en los comandos Where,No usar funciones dentro de clausula Where,Error
+,2.5  Variables con código en duro,No Asignar variables en código duro dentro del Where,Error
+,2.6 Subrutinas  ,Se debe iniciar siempre la variable de salida y una buena práctica es con la palabra clave “nullvalue” para iniciar según tipo de dato.,Error
+,2.7 Iteración y contadores de Variables  ,,Error
+,2.7.1 Iteraciones,"Evitar Variables sueltas i, j y k en las iteraciones.",Error
+,2.7.2 Contadores,"Evitar Variables sueltas i, j y k en los contadores.",Error
+,2.7.3 Condición,Para el caso de la variable condición se recomienda evitar la reutilización de las mismas de acuerdo.,Error
+,2.7.4 Variables no usadas,NO se deben definir variables ni vectores que no se utilicen dentro del programa. ,Error
+,,,
+,,,
+,Porcentaje de Error,10,

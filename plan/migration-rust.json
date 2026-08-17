@@ -1,0 +1,740 @@
+{
+  "meta": {
+    "project": "gx-linter-rs",
+    "sourceRepo": "genexus-linter-python",
+    "targetLanguage": "Rust 1.77+ (edition 2021)",
+    "database": "SQLite via rusqlite 0.31 bundled (sin servidor externo)",
+    "packageManager": "Cargo workspace",
+    "originalEntryPoints": ["main.py (CLI+GUI)", "gx_linter/app/engine/runtime.py (Single Source of Truth)"],
+    "newEntryPoints": ["crates/gx_app/src/main.rs (GUI eframe)", "crates/gx_app/src/bin/gx.rs (CLI clap)"],
+    "guidingPrinciple": "Paridad funcional 1:1 con Python, ParsedLine sanitizado una sola vez, dispatch por triggers, estado por regla con reset/evaluate/finalize, Quality Gate dual: CLI umbrales absolutos (errors<=max_errors AND warnings<=max_warnings) + GUI porcentual (errors/total*100 <= threshold_pct default 10)",
+    "knownDroppedPatterns": [
+      "AppState.__call__ hack (app_state.py:19-27): CustomTkinter internamente llama self.state() en widgets. En Rust/egui no aplica porque egui no tiene este mecanismo. Intentionally dropped.",
+      "importlib.reload hot-reload (runtime.py:108): Python recarga módulos dinámicamente. En Rust el registro es estático en all_rules(). Intentionally dropped.",
+      "isinstance flexibility en evaluate() return (runtime.py:325-329): Python permite Issue|List[Issue]|None. Rust siempre retorna Vec<Issue> (vacío si no hay hallazgos)."
+    ]
+  },
+  "crateStructure": {
+    "workspaceRoot": "gx-linter-rs/",
+    "workspaceCargoToml": "[workspace]\nresolver = \"2\"\nmembers = [\"crates/gx_core\",\"crates/gx_rules\",\"crates/gx_engine\",\"crates/gx_storage\",\"crates/gx_report\",\"crates/gx_app\"]\n\n[workspace.package]\nversion = \"1.0.0\"\nedition = \"2021\"\nauthors = [\"GX Linter Team\"]\nlicense = \"MIT\"\n\n[workspace.dependencies]\nanyhow = \"1.0\"\nthiserror = \"2.0\"\nserde = { version = \"1.0\", features = [\"derive\"] }\nserde_json = \"1.0\"\nregex = \"1.10\"\nonce_cell = \"1.19\"\nchrono = { version = \"0.4\", features = [\"serde\"] }\ntracing = \"0.1\"\ntracing-subscriber = { version = \"0.3\", features = [\"env-filter\"] }\n",
+    "directoryTree": "gx-linter-rs/\n Cargo.toml\n Cargo.lock\n rust-toolchain.toml  # channel = \"stable\"\n .cargo/config.toml\n migrations/\n   V001__initial_schema.sql\n   V002__seed_rules_and_settings.sql\n Reglas.csv  # copiado para seed inicial (solo lectura)\n crates/\n  gx_core/\n   Cargo.toml\n   src/\n    lib.rs\n    models.rs          # SourceLine, Issue, Severity, AuditMetrics, AuditContext, ParsedLine\n    regex_cache.rs     # Lazy<Regex> centralizados (STRING_COMMENT_PATTERN etc)\n    filesystem.rs      # validate_directory/file, find_source_files (walkdir+rayon)\n    xpz_extractor.rs   # extract_genexus_source, extract_source_from_xpz/xml, _decode_bytes\n  gx_rules/\n   Cargo.toml\n   src/\n    lib.rs             # pub trait Rule + registry fn all_rules()\n    base.rs            # trait Rule + helpers create_issue\n    helpers.rs         # is_where_continuation, BODY_KEYWORDS, has_logical_operator (consolidados de 4 rule files)\n    rules/\n     mod.rs\n     rule_gx_1_1.rs    # ... hasta rule_gx_2_7_4.rs (30 ficheros: 6 abstractas + 24 concretas)\n     rule_gx_1_2.rs\n     rule_gx_1_3.rs\n     rule_gx_1_3_1.rs\n     rule_gx_1_3_2.rs\n     rule_gx_1_3_3.rs\n     rule_gx_1_4.rs\n     rule_gx_1_4_1.rs\n     rule_gx_1_4_2.rs\n     rule_gx_1_4_3.rs\n     rule_gx_1_5.rs\n     rule_gx_1_6.rs\n     rule_gx_1_6_1.rs\n     rule_gx_1_6_2.rs\n     rule_gx_1_7.rs\n     rule_gx_1_7_1.rs\n     rule_gx_1_7_2.rs\n     rule_gx_1.rs\n     rule_gx_2_0.rs\n     rule_gx_2_1.rs\n     rule_gx_2_2.rs\n     rule_gx_2_3.rs\n     rule_gx_2_4.rs\n     rule_gx_2_5.rs\n     rule_gx_2_6.rs\n     rule_gx_2_7.rs\n     rule_gx_2_7_1.rs\n     rule_gx_2_7_2.rs\n     rule_gx_2_7_3.rs\n     rule_gx_2_7_4.rs\n  gx_engine/\n   Cargo.toml\n   src/\n    lib.rs\n    runtime.rs         # load_rules, discover_rules, collect_candidate_rules, evaluate_file, build_metrics, TRIGGER_MAP, DEFAULT_TRIGGER\n    dispatch.rs        # Trigger enum + flag mapping\n  gx_storage/\n   Cargo.toml\n   src/\n    lib.rs\n    db.rs              # Connection pool, migrations runner (rusqlite_migration), get_db_path via directories\n    dao/\n     mod.rs\n     rules_dao.rs      # CRUD rules, enabled flag, upsert from CSV\n     settings_dao.rs   # app_settings key/value\n     audit_dao.rs      # audit_runs + audit_issues + queries historial\n    seed.rs            # import Reglas.csv -> INSERT OR REPLACE\n  gx_report/\n   Cargo.toml\n   src/\n    lib.rs\n    pdf.rs             # PdfAuditReporter::generate (printpdf), KPI cards, banner, tabla hallazgos, latin-1 handling\n    html.rs            # opcional export html\n  gx_app/\n   Cargo.toml\n   src/\n    main.rs            # GUI eframe entry (MainApplication)\n    bin/\n     gx.rs            # CLI clap entry (run_cli)\n    cli/\n     mod.rs\n     args.rs           # Clap Parser struct\n    gui/\n     mod.rs\n     app.rs            # eframe::App impl (equivalente MainApplication)\n     state.rs          # AppState (current_file, issues, metrics, qg)\n     layouts/\n      mod.rs\n      sidebar.rs\n      header.rs\n      content.rs\n      console.rs\n     components/\n      mod.rs\n      issue_table.rs\n      quality_gate.rs\n      summary_card.rs\n      code_viewer.rs\n     dialogs/\n      mod.rs\n      about.rs\n      rules_dialog.rs\n      rule_config_dialog.rs\n    services/\n     mod.rs\n     file_service.rs   # rfd file picker\n     pdf_service.rs    # mueve pdf a destino elegido\n",
+    "cratesDetail": [
+      {
+        "name": "gx_core",
+        "purpose": "Dominio puro sin dependencias de UI/DB. Equivalente a gx_linter/app/core/{models,regex_cache,filesystem,xpz_extractor} + gx_linter/app/rules/base::ParsedLine",
+        "cargoToml": "[package]\nname = \"gx_core\"\nversion.workspace = true\nedition.workspace = true\n\n[dependencies]\nregex = { workspace = true }\nonce_cell = { workspace = true }\nencoding_rs = \"0.8\"\nzip = \"2.2\"\nquick-xml = \"0.31\"\nwalkdir = \"2.4\"\nrayon = \"1.8\"\nignore = \"0.4\"\nthiserror = { workspace = true }\nserde = { workspace = true }\n",
+        "publicExports": ["models::{SourceLine,Issue,Severity,AuditMetrics,AuditContext,ParsedLine}", "regex_cache::*", "filesystem::Filesystem", "xpz_extractor::{extract_genexus_source,extract_source_from_xpz,extract_source_from_xml,list_xpz_members}"],
+        "keyInvariants": ["ParsedLine::from_source hace STRING_COMMENT_PATTERN.sub una sola vez y expone clean/clean_lower/has_* flags", "has_* flags se computan sobre clean_lower para evitar falsos positivos en strings", "filesystem::find_source_files respeta extensiones .txt .prg .gxd .src .xpz .xml y excluye .py .pyc .csv .pdf"]
+      },
+      {
+        "name": "gx_rules",
+        "purpose": "Catálogo de reglas. Cada regla es struct con estado interno y impl Rule. Reemplaza 30 ficheros rule_gx_*.py + sync_rules.py HEURISTIC_TEMPLATES",
+        "cargoToml": "[package]\nname = \"gx_rules\"\nversion.workspace = true\nedition.workspace = true\n\n[dependencies]\ngx_core = { path = \"../gx_core\" }\nregex = { workspace = true }\nonce_cell = { workspace = true }\nthiserror = { workspace = true }\nserde = { workspace = true }\n",
+        "publicExports": ["base::Rule", "base::create_issue helper", "registry::all_rules() -> Vec<Box<dyn Rule>>", "registry::rule_ids()"],
+        "keyInvariants": ["Rule::triggers() vacío => DEFAULT_TRIGGER (corre en toda línea no vacía)", "Rule::reset(&mut self, file: &Path) llamado POR evaluate_file() internamente antes del loop de líneas (en Python lo llama el caller main.py:76, aquí consolidamos en el engine para evitar bugs)", "Rule::finalize opcional para reglas file-level (1.7.1, 2.7.4)", "is_abstract() filtra nodos estructurales GX.1, GX.1.4, GX.1.6, GX.1.7, GX.2.0, GX.2.7 (6 abstractas, no 5)"]
+      },
+      {
+        "name": "gx_engine",
+        "purpose": "Orquestador. Equivalente a gx_linter/app/engine/runtime.py. No contiene lógica de regla, solo carga, dispatch y métricas",
+        "cargoToml": "[package]\nname = \"gx_engine\"\nversion.workspace = true\nedition.workspace = true\n\n[dependencies]\ngx_core = { path = \"../gx_core\" }\ngx_rules = { path = \"../gx_rules\" }\ngx_storage = { path = \"../gx_storage\" }\nanyhow = { workspace = true }\nthiserror = { workspace = true }\ntracing = { workspace = true }\n",
+        "publicExports": ["runtime::{DEFAULT_TRIGGER, TRIGGER_MAP, load_rules, collect_candidate_rules, evaluate_file, build_metrics}", "dispatch::Trigger"],
+        "keyInvariants": ["load_rules filtra por RuleDao::is_rule_enabled (SQLite enabled flag) igual que runtime.py:201", "collect_candidate_rules siempre incluye DEFAULT_TRIGGER, luego triggers específicos, fallback a all_rules si vacío", "evaluate_file internamente llama reset() en cada regla antes del loop de líneas (consolidación de responsabilidad que en Python está en el caller)", "evaluate_file corta en 'generated subroutines (public)' igual que runtime.py:300", "build_metrics cuenta ERROR/WARNING/INFO y total_findings"]
+      },
+      {
+        "name": "gx_storage",
+        "purpose": "Persistencia SQLite para parámetros necesarios. Reemplaza config/rules.json + Reglas.csv runtime + memoria volátil. Única fuente de verdad para enabled/disabled y settings",
+        "cargoToml": "[package]\nname = \"gx_storage\"\nversion.workspace = true\nedition.workspace = true\n\n[dependencies]\nrusqlite = { version = \"0.31\", features = [\"bundled\",\"chrono\"] }\nrusqlite_migration = \"1.1\"\nr2d2 = \"0.8\"\nr2d2_sqlite = \"0.24\"\ndirectories = \"5.0\"\nserde = { workspace = true }\nserde_json = { workspace = true }\ncsv = \"1.3\"\nanyhow = { workspace = true }\nthiserror = { workspace = true }\nchrono = { workspace = true }\n",
+        "publicExports": ["db::{get_db_path, init_db, get_pool}", "dao::rules_dao::RuleDao", "dao::settings_dao::SettingsDao", "dao::audit_dao::AuditDao", "seed::import_reglas_csv"],
+        "keyInvariants": ["DB path = directories::ProjectDirs::from('com','GX','Linter').data_dir()/gx_linter.db ; fallback a ./data/gx_linter.db", "Migrations se ejecutan al inicio via rusqlite_migration::Migrations::to_latest", "Reglas.csv se importa una vez si tabla rules vacía o via comando gx --seed"]
+      },
+      {
+        "name": "gx_report",
+        "purpose": "Generación PDF. Port de gx_linter/app/core/reporter.py PdfAuditReporter",
+        "cargoToml": "[package]\nname = \"gx_report\"\nversion.workspace = true\nedition.workspace = true\n\n[dependencies]\ngx_core = { path = \"../gx_core\" }\nprintpdf = \"0.7\"\nlopdf = \"0.32\"\nchrono = { workspace = true }\nanyhow = { workspace = true }\nthiserror = { workspace = true }\ndirectories = \"5.0\"\n",
+        "publicExports": ["pdf::PdfAuditReporter::generate(output_name, metrics, issues, qg_passed) -> PathBuf"],
+        "keyInvariants": ["Landscape A4, PAGE_WIDTH 277, LEFT_MARGIN 10 igual que reporter.py:8", "KPI cards Total/Errores/Warnings/Info con colores C_PRIMARY etc", "Banner Quality Gate verde/rojo según qg_passed", "Tabla ordenada por severity ERROR>WARNING>INFO, paginación con header repetido", "clean_str reemplaza \\n/\\r y latin-1 encode replace igual que reporter.py:78"]
+      },
+      {
+        "name": "gx_app",
+        "purpose": "Binarios finales. CLI (clap) y GUI (eframe/egui). Equivalente a main.py + gx_linter/app/ui/main_window.py + services + layouts",
+        "cargoToml": "[package]\nname = \"gx_app\"\nversion.workspace = true\nedition.workspace = true\n\n[[bin]]\nname = \"gx\"\npath = \"src/bin/gx.rs\"\n\n[[bin]]\nname = \"gx_linter_gui\"\npath = \"src/main.rs\"\n\n[dependencies]\ngx_core = { path = \"../gx_core\" }\ngx_engine = { path = \"../gx_engine\" }\ngx_storage = { path = \"../gx_storage\" }\ngx_report = { path = \"../gx_report\" }\ngx_rules = { path = \"../gx_rules\" }\nclap = { version = \"4.5\", features = [\"derive\"] }\neframe = { version = \"0.28\", features = [\"default_fonts\",\"glow\"] }\negui = \"0.28\"\negui_extras = { version = \"0.28\", features = [\"all\"] }\nrfd = \"0.14\"\nchrono = { workspace = true }\ntracing = { workspace = true }\ntracing-subscriber = { workspace = true }\nanyhow = { workspace = true }\nthiserror = { workspace = true }\n",
+        "publicExports": ["cli::args::Cli", "gui::app::MainApplication", "gui::state::AppState", "services::{file_service::FileService, pdf_service::PdfService}"],
+        "keyInvariants": ["CLI args --file --max-errors (default 0) --max-warnings (default 999999) idénticos a main.py:156", "GUI AuditRunner usa std::thread::spawn + channel + egui::Context::request_repaint (no bloquea UI)", "Quality Gate DUAL: CLI usa umbrales absolutos qg_passed = errors<=max_errors AND warnings<=max_warnings (main.py:96-99); GUI usa porcentual error_pct = errors*100/total <= qg_threshold_pct default 10 (main_window.py:85-91). NO son el mismo algoritmo, Rust debe implementar ambos y seleccionar según entrypoint"]
+      }
+    ]
+  },
+  "libraries": {
+    "selectionRationale": "Criterios: pure Rust, Windows 10/11 first-class, binario pequeño, compilación rápida, sin runtime Node/Java, API estable",
+    "byDomain": {
+      "cli": { "chosen": "clap 4 derive", "alternatives": ["bpaf","argh"], "reason": "Derive macro, validación tipos, help auto, estándar industria, paridad argparse", "usage": "crates/gx_app/src/cli/args.rs" },
+      "gui": {
+        "chosen": "egui 0.28 + eframe 0.28 (glow)",
+        "alternatives": [
+          { "name": "iced 0.12", "pros": "Elm architecture, widgets nativos bellos", "cons": "API rompe entre minors, curva aprendizaje" },
+          { "name": "slint 1.7", "pros": "Declarativo .slint DSL, diseñador visual", "cons": "DSL propio, binario mayor" },
+          { "name": "tauri 2", "pros": "Frontend web React/Svelte, reutiliza CSS", "cons": "Requiere WebView2, bundle 20MB+ web, dos lenguajes" }
+        ],
+        "reason": "Immediate-mode igual que customtkinter, 100% Rust, hot-reload, <12MB release, sin WebView, integra perfecto con eframe polling para AuditRunner",
+        "fallbackIfDesignRequiresPixelPerfect": "slint si necesitan tema exacto customtkinter; tauri si prefieren HTML/CSS"
+      },
+      "pdf": { "chosen": "printpdf 0.7 (+ lopdf para merge)", "alternatives": ["genpdf-rs","tectonic","wkhtmltopdf"], "reason": "Bajo nivel rect/cell idéntico a fpdf2, fonts embebidas, sin LaTeX, control mm exacto PAGE_WIDTH 277", "note": "Incluir DejaVuSans.ttf embebida y mapear latin-1 igual que reporter.py core_fonts_encoding" },
+      "regex": { "chosen": "regex 1.10 + once_cell LazyLock", "reason": "Una sola compilación por patrón, 3-10x más rápido que Python re, usar Regex::new una vez en regex_cache.rs" },
+      "csv": { "chosen": "csv 1.3 + serde", "reason": "Deserializa Reglas.csv directo a struct CsvRule, maneja encoding utf-8-sig y comas en descripción" },
+      "zipXml": { "chosen": "zip 2.2 + quick-xml 0.31 + encoding_rs 0.8", "reason": "zip::ZipArchive para .xpz, quick-xml para buscar <Events><![CDATA[ sin DOM completo, encoding_rs para fallback latin-1/cp1252 igual que xpz_extractor.py:_decode_bytes" },
+      "sqlite": { "chosen": "rusqlite 0.31 bundled + rusqlite_migration 1.1 + r2d2_sqlite 0.24", "alternatives": ["sqlx (async, compile-time checked)","diesel"], "reason": "Síncrono bloqueante perfecto para desktop, bundled evita instalar sqlite3.dll, migrations versionadas, r2d2 pool thread-safe para GUI+CLI concurrente" },
+      "fsWalk": { "chosen": "walkdir 2.4 + rayon 1.8 + ignore 0.4", "reason": "walkdir recursivo filtrado extensiones, rayon par_iter para evaluar múltiples archivos en paralelo, ignore respeta .gitignore" },
+      "asyncThreading": { "chosen": "std::thread + crossbeam-channel 0.5 + egui Context", "reason": "No necesita tokio para linter CPU-bound; AuditRunner thread daemon igual que Python threading.Thread daemon=True" },
+      "errorLogging": { "chosen": "anyhow 1 + thiserror 2 + tracing 0.1 + tracing-subscriber env-filter", "reason": "anyhow para bubbling auditor, thiserror para errores tipados StorageError, tracing para diagnóstico [ENGINE] y [RULE ERROR] igual que runtime.py prints a stderr" },
+      "configDirs": { "chosen": "directories 5.0", "reason": "ProjectDirs::from('com','GX','Linter') da data_dir correcto Windows %APPDATA% / Linux ~/.local/share" },
+      "filePicker": { "chosen": "rfd 0.14 (native dialog)", "reason": "FileDialog::pick_file con filtros *.xpz *.xml *.txt igual que FileService.browse_file" }
+    }
+  },
+  "ddl": {
+    "engine": "SQLite 3.45+ (bundled via rusqlite)",
+    "pragmas": "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;",
+    "migrations": [
+      {
+        "id": "V001__initial_schema",
+        "file": "migrations/V001__initial_schema.sql",
+        "sql": "PRAGMA journal_mode=WAL;\nPRAGMA foreign_keys=ON;\n\n-- Categorías extraídas de Reglas.csv (ej: '1. Código de programas fuentes')\nCREATE TABLE IF NOT EXISTS rule_categories (\n    id TEXT PRIMARY KEY, -- \"1\", \"1.4\", \"2.0\"\n    name TEXT NOT NULL,\n    description TEXT,\n    sort_order INTEGER NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS rules (\n    id TEXT PRIMARY KEY, -- \"GX.1.1\", \"GX.2.3\" (formato final con prefijo GX.)\n    raw_id TEXT NOT NULL UNIQUE, -- \"1.1\", \"2.3\" sin prefijo para mapeo CSV\n    name TEXT NOT NULL, -- \"Uso de Mayúsculas y Minúsculas\"\n    description TEXT NOT NULL, -- Detalle columna 2 de Reglas.csv\n    severity TEXT NOT NULL CHECK (severity IN ('ERROR','WARNING','INFO')) DEFAULT 'WARNING',\n    category_id TEXT REFERENCES rule_categories(id) ON DELETE SET NULL,\n    enabled BOOLEAN NOT NULL DEFAULT 1,\n    is_abstract BOOLEAN NOT NULL DEFAULT 0, -- 1 para nodos agrupadores sin evaluate (GX.1, GX.1.4 etc)\n    triggers TEXT NOT NULL DEFAULT '[]', -- JSON array de strings: '[\"&\",\"where\"]' para dispatch\n    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),\n    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))\n);\n\nCREATE TABLE IF NOT EXISTS app_settings (\n    key TEXT PRIMARY KEY, -- \"max_errors\", \"max_warnings\", \"qg_threshold_pct\", \"last_open_dir\", \"theme\", \"pdf_output_dir\"\n    value TEXT NOT NULL,\n    value_type TEXT NOT NULL CHECK (value_type IN ('string','integer','float','boolean','json')) DEFAULT 'string',\n    description TEXT,\n    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))\n);\n\nCREATE TABLE IF NOT EXISTS audit_runs (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    file_path TEXT NOT NULL, -- path absoluto auditado (equivalente AuditContext.project_path)\n    file_name TEXT NOT NULL, -- solo nombre para display rápido\n    file_hash TEXT, -- sha256 del contenido para deduplicar (opcional)\n    file_size_bytes INTEGER,\n    started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),\n    finished_at TEXT,\n    duration_ms INTEGER, -- (time.perf_counter() igual que runtime.py:295)\n    total_findings INTEGER NOT NULL DEFAULT 0,\n    errors INTEGER NOT NULL DEFAULT 0,\n    warnings INTEGER NOT NULL DEFAULT 0,\n    info INTEGER NOT NULL DEFAULT 0,\n    qg_threshold_pct REAL NOT NULL DEFAULT 10.0, -- porcentaje máximo errores permitido (Reglas.csv:37 Porcentaje de Error 10)\n    qg_passed BOOLEAN NOT NULL DEFAULT 0, -- 1 si errors/total*100 <= qg_threshold_pct y errors<=max_errors y warnings<=max_warnings\n    max_errors INTEGER NOT NULL DEFAULT 0,\n    max_warnings INTEGER NOT NULL DEFAULT 999999,\n    pdf_path TEXT, -- path generado por PdfAuditReporter\n    engine_version TEXT NOT NULL DEFAULT '1.0.0',\n    triggered_by TEXT NOT NULL CHECK (triggered_by IN ('cli','gui')) DEFAULT 'gui'\n);\n\nCREATE TABLE IF NOT EXISTS audit_issues (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    audit_run_id INTEGER NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,\n    rule_id TEXT NOT NULL REFERENCES rules(id) ON DELETE RESTRICT,\n    severity TEXT NOT NULL CHECK (severity IN ('ERROR','WARNING','INFO')),\n    line_number INTEGER NOT NULL,\n    line_content TEXT NOT NULL, -- texto original de la línea (SourceLine.content)\n    description TEXT NOT NULL, -- mensaje final (description_override o rule.description)\n    file_path TEXT NOT NULL, -- redundante para queries sin join (igual que Issue.file_path)\n    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))\n);\n\n-- Índices para queries frecuentes de UI\nCREATE INDEX IF NOT EXISTS idx_rules_enabled ON rules(enabled);\nCREATE INDEX IF NOT EXISTS idx_rules_category ON rules(category_id);\nCREATE INDEX IF NOT EXISTS idx_rules_severity ON rules(severity);\nCREATE INDEX IF NOT EXISTS idx_audit_runs_started ON audit_runs(started_at DESC);\nCREATE INDEX IF NOT EXISTS idx_audit_runs_file ON audit_runs(file_path);\nCREATE INDEX IF NOT EXISTS idx_audit_issues_run ON audit_issues(audit_run_id);\nCREATE INDEX IF NOT EXISTS idx_audit_issues_rule ON audit_issues(rule_id);\nCREATE INDEX IF NOT EXISTS idx_audit_issues_severity ON audit_issues(severity);\n\n-- Trigger para updated_at automático en rules y app_settings\nCREATE TRIGGER IF NOT EXISTS trg_rules_updated_at AFTER UPDATE ON rules\nBEGIN\n  UPDATE rules SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = NEW.id;\nEND;\n\nCREATE TRIGGER IF NOT EXISTS trg_settings_updated_at AFTER UPDATE ON app_settings\nBEGIN\n  UPDATE app_settings SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key = NEW.key;\nEND;\n\n-- Vista útil para dashboard (equivalente a build_metrics + quality gate)\nCREATE VIEW IF NOT EXISTS v_audit_summary AS\nSELECT\n  ar.id,\n  ar.file_name,\n  ar.started_at,\n  ar.total_findings,\n  ar.errors,\n  ar.warnings,\n  ar.info,\n  ar.qg_passed,\n  CASE WHEN ar.total_findings > 0 THEN (ar.errors * 100.0 / ar.total_findings) ELSE 0 END AS error_pct,\n  ar.qg_threshold_pct,\n  (SELECT COUNT(*) FROM audit_issues ai WHERE ai.audit_run_id = ar.id AND ai.severity='ERROR') AS calc_errors,\n  (SELECT COUNT(*) FROM audit_issues ai WHERE ai.audit_run_id = ar.id AND ai.severity='WARNING') AS calc_warnings\nFROM audit_runs ar;\n"
+      },
+      {
+        "id": "V002__seed_rules_and_settings",
+        "file": "migrations/V002__seed_rules_and_settings.sql",
+        "sql": "-- Settings por defecto (equivalente a AuditContext defaults + config/rules.json defaults + Reglas.csv porcentaje)\nINSERT OR IGNORE INTO app_settings(key, value, value_type, description) VALUES\n  ('max_errors', '0', 'integer', 'Umbral máximo errores para Quality Gate CLI (main.py --max-errors)'),\n  ('max_warnings', '999999', 'integer', 'Umbral máximo warnings para Quality Gate CLI'),\n  ('qg_threshold_pct', '10.0', 'float', 'Porcentaje máximo errores/total permitido (Reglas.csv Porcentaje de Error 10)'),\n  ('theme', 'dark', 'string', 'Tema GUI: dark|light'),\n  ('last_open_dir', '', 'string', 'Último directorio abierto en FileService'),\n  ('pdf_output_dir', '', 'string', 'Directorio salida PDF, vacío = Downloads'),\n  ('engine_version', '1.0.0', 'string', 'Versión engine para trazabilidad audit_runs'),\n  ('seed_csv_hash', '', 'string', 'Hash de Reglas.csv usado para seed, para detectar cambios');\n\n-- Categorías base (extraídas de Reglas.csv col1)\nINSERT OR IGNORE INTO rule_categories(id, name, description, sort_order) VALUES\n  ('1', 'Código de programas fuentes - Advertencias', 'Sección 1 Advertencias', 10),\n  ('1.4', 'Variables', 'Subcategoría 1.4', 14),\n  ('1.6', 'Comentarios', 'Subcategoría 1.6', 16),\n  ('1.7', 'Modificaciones/Mantenimiento', 'Subcategoría 1.7', 17),\n  ('2.0', 'Mejores Prácticas - Errores', 'Sección 2 Errores', 20),\n  ('2.7', 'Iteración y contadores de Variables', 'Subcategoría 2.7', 27);\n\n-- Reglas: el seed real lo hace Rust seed::import_reglas_csv que hace UPSERT desde Reglas.csv\n-- Aquí solo placeholders para que FK funcione si seed aún no corre; el importador las reemplazará\nINSERT OR IGNORE INTO rules(id, raw_id, name, description, severity, category_id, enabled, is_abstract, triggers) VALUES\n  ('GX.1.1', '1.1', 'Uso de Mayúsculas y Minúsculas', 'Usar Mayúsculas y Minúsculas en uso de variables, variable empieza con &', 'WARNING', '1', 0, 0, '[\"&\"]'),\n  ('GX.1.2', '1.2', 'Indentar código', 'Indentar línea de código en uso de For each, If Then Else, Case', 'WARNING', '1', 0, 0, '[]'),\n  ('GX.1.3', '1.3', 'Sintaxis de Sentencias particulares', 'Se debe indicar el índice que se está recorriendo en el For Each. También al finalizar el recorrido indicar el nombre de la tabla. Uso obligatorio la sentencia del DEFINED BY al final del Where', 'WARNING', '1', 1, 0, '[\"for each\"]'),\n  ('GX.1.3.1', '1.3.1', 'For Each', 'Se debe indentar el For Each en cada Where y en el cuerpo de código', 'WARNING', '1', 0, 0, '[\"where\"]'),\n  ('GX.1.3.2', '1.3.2', 'If', 'Condiciones If debe estar completo con su Else.', 'WARNING', '1', 1, 0, '[]'),\n  ('GX.1.3.3', '1.3.3', 'Case', 'Condiciones Case debe estar completo con su Otherwise.', 'WARNING', '1', 1, 0, '[\"case\"]'),\n  ('GX.1.4.1', '1.4.1', 'Concepto de Variables', 'No se deben reutilizar variables en distintas partes del código', 'WARNING', '1.4', 0, 0, '[\"=\"]'),\n  ('GX.1.4.2', '1.4.2', 'Definición', 'En sentencias de decisión (If, Case) se debe usar variables, no debe usarse atributos.', 'WARNING', '1.4', 0, 0, '[\"if\",\"case\"]'),\n  ('GX.1.4.3', '1.4.3', 'Parámetros', 'Definir cada parámetro si es de entrada o de salida, en la sección rule. Por tanto debe tener In: o Out:.', 'WARNING', '1.4', 1, 0, '[\"*\"]'),\n  ('GX.1.5', '1.5', 'Condiciones Booleanas', 'No es recomendable definir condiciones booleanas con más de tres operandos', 'WARNING', '1', 1, 0, '[\"if\",\"case\"]'),\n  ('GX.1.6.1', '1.6.1', 'Comentario en el llamado a Sub Rutinas', 'Antes del llamado con DO poner un comentario', 'WARNING', '1.6', 0, 0, '[\"do\"]'),\n  ('GX.1.6.2', '1.6.2', 'Describir la Sub Rutina', 'En la subrutina Sub en la siguiente fila poner un Comentario de Descripción', 'WARNING', '1.6', 0, 0, '[\"sub\"]'),\n  ('GX.1.7.1', '1.7.1', 'Historia de Cambios', 'En la sección Rules poner: CODIGO INICIATIVA, DESCRIPCION, RESPONSIBLE, VERSION', 'WARNING', '1.7', 0, 0, '[]'),\n  ('GX.1.7.2', '1.7.2', 'Comentario sobre cambios en filas', 'Cuando se comente una fila con // poner al final un comentario con //', 'WARNING', '1.7', 1, 0, '[]'),\n  ('GX.2.1', '2.1', 'Evitar uso de When dentro de cláusulas Where', 'Se debe evitar usar clausula When dentro del condicional Where', 'ERROR', '2.0', 1, 0, '[\"where\"]'),\n  ('GX.2.2', '2.2', 'Evitar palabras de condiciones In, Or o And dentro de cláusulas Where', 'Evitar In, Or, And dentro del Where', 'ERROR', '2.0', 1, 0, '[\"where\"]'),\n  ('GX.2.3', '2.3', 'For Each anidados', 'Evitar For Each / End For solo se permite dos anidaciones', 'ERROR', '2.0', 1, 0, '[]'),\n  ('GX.2.4', '2.4', 'No usar funciones en los comandos Where', 'No usar funciones dentro de clausula Where', 'ERROR', '2.0', 1, 0, '[\"where\"]'),\n  ('GX.2.5', '2.5', 'Variables con código en duro', 'No Asignar variables en código duro dentro del Where', 'ERROR', '2.0', 1, 0, '[\"=\"]'),\n  ('GX.2.6', '2.6', 'Subrutinas', 'Se debe iniciar siempre la variable de salida y una buena práctica es con la palabra clave nullvalue', 'ERROR', '2.0', 1, 0, '[\"sub\"]'),\n  ('GX.2.7.1', '2.7.1', 'Iteraciones', 'Evitar Variables sueltas i, j y k en las iteraciones.', 'ERROR', '2.7', 1, 0, '[\"for each\"]'),\n  ('GX.2.7.2', '2.7.2', 'Contadores', 'Evitar Variables sueltas i, j y k en los contadores.', 'ERROR', '2.7', 1, 0, '[\"=\"]'),\n  ('GX.2.7.3', '2.7.3', 'Condición', 'Para el caso de la variable condición se recomienda evitar la reutilización', 'ERROR', '2.7', 1, 0, '[\"=\"]'),\n  ('GX.2.7.4', '2.7.4', 'Variables no usadas', 'NO se deben definir variables ni vectores que no se utilicen dentro del programa.', 'ERROR', '2.7', 0, 0, '[\"&\"]'),\n  ('GX.1', '1', 'Código de programas fuentes', 'Nodo agrupador advertencias', 'WARNING', '1', 0, 1, '[]'),\n  ('GX.1.4', '1.4', 'Variables', 'Nodo agrupador variables', 'WARNING', '1.4', 0, 1, '[]'),\n  ('GX.1.6', '1.6', 'Comentarios', 'Nodo agrupador comentarios', 'WARNING', '1.6', 0, 1, '[]'),\n  ('GX.1.7', '1.7', 'Modificaciones/Mantenimiento', 'Nodo agrupador mantenimiento', 'WARNING', '1.7', 0, 1, '[]'),\n  ('GX.2.0', '2.0', 'Mejores Prácticas', 'Nodo agrupador errores', 'ERROR', '2.0', 0, 1, '[]'),\n  ('GX.2.7', '2.7', 'Iteración y contadores', 'Nodo agrupador iteración', 'ERROR', '2.7', 0, 1, '[]');\n"
+      }
+    ],
+    "seedProcedure": {
+      "file": "crates/gx_storage/src/seed.rs",
+      "function": "pub fn import_reglas_csv(conn: &Connection, csv_path: &Path) -> Result<usize>",
+      "steps": [
+        "Calcular sha256 de Reglas.csv y comparar con app_settings.seed_csv_hash; si igual skip",
+        "Abrir csv con csv::ReaderBuilder { flexible(true), trim(Trim::All), encoding utf8-lossless } y saltar filas vacías igual que sync_rules.py:438",
+        "Para cada row con regex r'^\\s*(\\d+(?:\\.\\d+)*)' en col1: extraer raw_id y name; severity = si col3 contiene 'error' => ERROR sino WARNING (igual que sync_rules.py:518)",
+        "Sanitizar raw_id -> id = format!('GX.{}', raw_id), triggers según mapeo hardcodeado del código Python real (NO HEURISTIC_TEMPLATES que es legacy). Tabla de triggers correcta: 1.1=>[\"&\"], 1.2=>[\"*\"], 1.3=>[\"for each\"], 1.3.1=>[\"where\"], 1.3.2=>[] (DEFAULT=*), 1.3.3=>[\"case\"], 1.4.1=>[\"=\",\"&\"], 1.4.2=>[\"if\",\"case\"], 1.4.3=>[\"*\"], 1.5=>[\"if\",\"case\"], 1.6.1=>[\"do\"], 1.6.2=>[\"sub\"], 1.7.1=>[\"*\"], 1.7.2=>[\"*\"], 2.1=>[\"where\",\"for each\"], 2.2=>[\"where\",\"for each\"], 2.3=>[] (DEFAULT=*), 2.4=>[\"where\",\"for each\"], 2.5=>[\"where\",\"for each\"], 2.6=>[\"sub\"], 2.7.1=>[\"for each\",\"do\"], 2.7.2=>[\"=\",\"&\"], 2.7.3=>[\"=\",\"&\"], 2.7.4=>[\"&\"]. Nota: [] significa que la regla usa DEFAULT_TRIGGER (\"*\") explícitamente en el código Python",
+        "Ejecutar INSERT OR REPLACE INTO rules(id,raw_id,name,description,severity,category_id,enabled,is_abstract,triggers) con enabled preservando valor existente si ya existe (SELECT enabled antes), is_abstract=0 siempre para filas CSV",
+        "Actualizar app_settings.seed_csv_hash con nuevo hash y qg_threshold_pct si Reglas.csv contiene fila Porcentaje de Error"
+      ],
+      "sqlUpsertExample": "INSERT INTO rules(id,raw_id,name,description,severity,category_id,enabled,is_abstract,triggers,updated_at)\nVALUES (?1,?2,?3,?4,?5,?6, COALESCE((SELECT enabled FROM rules WHERE id=?1), ?7), 0, ?8, strftime('%Y-%m-%dT%H:%M:%fZ','now'))\nON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description, severity=excluded.severity, category_id=excluded.category_id, triggers=excluded.triggers, updated_at=excluded.updated_at;"
+    },
+    "exampleQueries": [
+      "SELECT id, name, enabled FROM rules WHERE is_abstract=0 ORDER BY raw_id; -- lista para RulesDialog",
+      "UPDATE rules SET enabled=0 WHERE id='GX.2.3'; -- deshabilitar regla desde GUI",
+      "SELECT * FROM v_audit_summary ORDER BY started_at DESC LIMIT 20; -- historial",
+      "SELECT ai.line_number, ai.description, r.name FROM audit_issues ai JOIN rules r ON r.id=ai.rule_id WHERE ai.audit_run_id=?1 ORDER BY CASE ai.severity WHEN 'ERROR' THEN 0 WHEN 'WARNING' THEN 1 ELSE 2 END;",
+      "SELECT value FROM app_settings WHERE key='qg_threshold_pct'; -- threshold dinámico"
+    ]
+  },
+  "backlog": [
+    {
+      "id": "EPIC-00",
+      "title": "Análisis de Paridad Pre-Migración (Golden Snapshot)",
+      "description": "Capturar el comportamiento exacto del sistema Python ANTES de empezar a codear en Rust. Sin este baseline, los tests de paridad (ST-10.1) no tienen referencia.",
+      "priority": "Máxima",
+      "stories": [
+        {
+          "id": "ST-00.1",
+          "title": "Capturar golden snapshot de ejemplo_codigo.txt",
+          "instructions": [
+            "Ejecutar `python main.py --file ejemplo_codigo.txt --max-errors 0 --max-warnings 999999` y capturar stdout completo",
+            "Guardar output en `tests/fixtures/golden_snapshot_cli.txt` con: Reglas cargadas (número), Hallazgos, Errores, Warnings, Info, Quality Gate (APROBADO/RECHAZADO)",
+            "Ejecutar también con `--max-errors 5` para capturar escenario Quality Gate rechazado",
+            "Guardar lista exacta de issues (rule_id, line_number, severity) en `tests/fixtures/golden_issues.json` usando un script Python que importe el engine directamente"
+          ],
+          "acceptanceCriteria": [
+            "Archivo `golden_snapshot_cli.txt` existe con output exacto de Python",
+            "Archivo `golden_issues.json` tiene array de {rule_id, line_number, severity, description} para cada hallazgo",
+            "Total de issues en JSON coincide con 'Hallazgos' del snapshot CLI"
+          ],
+          "files": ["tests/fixtures/golden_snapshot_cli.txt", "tests/fixtures/golden_issues.json"]
+        },
+        {
+          "id": "ST-00.2",
+          "title": "Documentar triggers reales por regla",
+          "instructions": [
+            "Crear script Python que importe todas las reglas y para cada una extraiga: rule_id, triggers (o 'DEFAULT' si no tiene), severity, has_finalize, has_state",
+            "Guardar en `tests/fixtures/rule_manifest.json` como tabla de verdad para validación Rust",
+            "Incluir conteo: 24 concretas, 6 abstractas, 14 WARNING, 10 ERROR, 2 con finalize, 15 con estado"
+          ],
+          "acceptanceCriteria": [
+            "rule_manifest.json tiene 30 entradas (24+6)",
+            "Cada entrada tiene triggers correcto (verificado contra código fuente)",
+            "Archivo servirá como acceptance criteria para ST-05.2 y ST-06.*"
+          ],
+          "files": ["tests/fixtures/rule_manifest.json"]
+        }
+      ]
+    },
+    {
+      "id": "EPIC-01",
+      "title": "Workspace, Toolchain y CI",
+      "description": "Crear workspace Cargo, toolchain, lints y pipeline CI que reemplace build.ps1/PyInstaller. Base para todos los crates.",
+      "priority": "Máxima",
+      "stories": [
+        {
+          "id": "ST-01.1",
+          "title": "Inicializar workspace y rust-toolchain",
+          "instructions": [
+            "Ejecutar `cargo new gx-linter-rs --name gx_app` luego reestructurar a workspace con `mkdir -p crates/{gx_core,gx_rules,gx_engine,gx_storage,gx_report,gx_app}`",
+            "Crear `rust-toolchain.toml` con `channel=\"stable\" components=[\"rustfmt\",\"clippy\"]`",
+            "Crear `Cargo.toml` workspace con el contenido de `crateStructure.workspaceCargoToml` de este JSON",
+            "Crear `.cargo/config.toml` con `[build] target-dir=\"target\"`",
+            "Verificar `cargo check --workspace` pasa sin warnings"
+          ],
+          "acceptanceCriteria": [
+            "Existe `gx-linter-rs/Cargo.toml` con 6 members y workspace.dependencies",
+            "`cargo check --workspace` exitoso en Windows",
+            "`cargo fmt --check` y `cargo clippy --workspace -- -D warnings` sin errores"
+          ],
+          "crate": "workspace",
+          "files": ["Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml"]
+        },
+        {
+          "id": "ST-01.2",
+          "title": "Pipeline CI y pre-commit hooks",
+          "instructions": [
+            "Crear `.github/workflows/ci.yml` con jobs: fmt, clippy, test, audit (`cargo audit`), build release",
+            "Añadir `cargo-husky` o `pre-commit` hook que ejecute `cargo fmt && cargo clippy`",
+            "Configurar `tracing-subscriber` con `RUST_LOG=gx_engine=debug` para logs equivalentes a runtime.py prints a stderr"
+          ],
+          "acceptanceCriteria": [
+            "CI corre en push/PR y falla si fmt/clippy/test fallan",
+            "Logs de engine visibles con `RUST_LOG=debug cargo run`"
+          ],
+          "files": [".github/workflows/ci.yml"]
+        },
+        {
+          "id": "ST-01.3",
+          "title": "Reemplazo de build.ps1 por cargo xtask",
+          "instructions": [
+            "Crear crate `xtask` con `cargo xtask build` que hace `cargo build --release` + `cargo bundle` o `cargo pack` para MSI",
+            "Eliminar dependencia PyInstaller; binario final en `target/release/gx.exe` y `target/release/gx_linter_gui.exe`",
+            "Documentar en README.md comandos `cargo run -p gx_app -- --file ejemplo_codigo.txt` y `cargo run -p gx_app --bin gx_linter_gui`"
+          ],
+          "acceptanceCriteria": [
+            "Ejecutable release <20MB (vs PyInstaller 80MB) y arranca <500ms",
+            "No existe dependencia Python en runtime"
+          ],
+          "files": ["xtask/src/main.rs", "README.md"]
+        }
+      ]
+    },
+    {
+      "id": "EPIC-02",
+      "title": "Dominio Core: Models y ParsedLine",
+      "description": "Portar gx_linter/app/core/models.py y gx_linter/app/rules/base.py ParsedLine + regex_cache.py. Debe ser 1:1 con sanitización única.",
+      "priority": "Máxima",
+      "stories": [
+        {
+          "id": "ST-02.1",
+          "title": "Implementar models.rs",
+          "instructions": [
+            "Crear `crates/gx_core/src/models.rs` con structs: SourceLine {number: u32, content: String}, Issue {rule_id, severity, line_number, line_content, description, file_path: PathBuf}, Severity enum, AuditMetrics {total_findings, errors, warnings, info}, AuditContext {project_path, rules_path, max_errors, max_warnings, qg_threshold_pct, extra_settings: HashMap}",
+            "Derivar Debug, Clone, Serialize/Deserialize donde aplique",
+            "Portar `build_metrics` como `impl AuditMetrics { fn from_issues(&[Issue]) -> Self }` contando severities igual que runtime.py:376"
+          ],
+          "acceptanceCriteria": [
+            "Tests unitarios: `build_metrics` con 2 ERROR 1 WARNING 1 INFO => total 4",
+            "Severity serializa a 'ERROR'/'WARNING'/'INFO' string"
+          ],
+          "crate": "gx_core",
+          "files": ["crates/gx_core/src/models.rs"]
+        },
+        {
+          "id": "ST-02.2",
+          "title": "Centralizar regex_cache.rs con LazyLock",
+          "instructions": [
+            "Crear `crates/gx_core/src/regex_cache.rs` con `pub static STRING_COMMENT_PATTERN: LazyLock<Regex>` compilando `r#\"\"[^\\\"]*\"|'[^']*'|//.*$|/\\*.*?\\*/\"#` con `RegexBuilder::multi_line(true)` igual que regex_cache.py:28",
+            "Añadir `VARIABLE_LOWERCASE_PATTERN`, `VARIABLE_ANY_PATTERN`, `FUNCTION_CALL_PATTERN`, `PARM_START_PATTERN`, `PARM_CONTENT_PATTERN`, `ASSIGN_PATTERN`, `WORD_PATTERN` todos como LazyLock",
+            "Añadir `LOGICAL_OP_PATTERN` compilando `\\b(?:and|or)\\b` (SIN negative lookbehind). Rust regex no soporta lookbehind. Añadir helper fn: `pub fn has_logical_operator(clean_lower: &str) -> bool { for m in LOGICAL_OP_PATTERN.find_iter(clean_lower) { if m.start() == 0 || clean_lower.as_bytes()[m.start()-1] != b'&' { return true; } } false }` — equivalente funcional al `(?<!&)\b(?:and|or)\b` de Python regex_cache.py:55",
+            "NO incluir EVENTS_CDATA_RE aquí — vive en xpz_extractor.rs (igual que en Python xpz_extractor.py:49, NO en regex_cache.py)",
+            "Añadir patrones que en Python son locales: `DIRECTION_PATTERN` (r\"^(in|out|inout)\\s*:\" case-insensitive, de rule_gx_1_4_3.py:15), `LOOP_VARIABLE_PATTERN` (r\"&[a-zA-Z_][a-zA-Z0-9_]*\" de rule_gx_2_7_1.py:12), `DO_NAME_PATTERN` (r\"(?i)(?:^|\\s)do\\s+(?P<name>...)\" de rule_gx_1_6_1.py:40). Centralizar aquí para cumplir la regla de no Regex::new local",
+            "Añadir test que verifica STRING_COMMENT_PATTERN borra strings y comentarios pero no código",
+            "Añadir test para has_logical_operator: \"a and b\" => true, \"&and = 5\" => false, \"or x\" => true",
+            "Regla: ningún fichero fuera de regex_cache.rs puede hacer `Regex::new`"
+          ],
+          "acceptanceCriteria": [
+            "Todos los Regex son `LazyLock` y se compilan una sola vez (verificar con `cargo test -- --nocapture` y contador)",
+            "`has_logical_operator(\"a and b\")==true`, `has_logical_operator(\"&and = 5\")==false` (equivalente al lookbehind Python)",
+            "Patrones DIRECTION_PATTERN, LOOP_VARIABLE_PATTERN, DO_NAME_PATTERN centralizados aquí (no en rule files)",
+            "Clippy rule custom o grep prohíbe `Regex::new` fuera de regex_cache.rs"
+          ],
+          "crate": "gx_core",
+          "files": ["crates/gx_core/src/regex_cache.rs"]
+        },
+        {
+          "id": "ST-02.3",
+          "title": "Implementar ParsedLine::from_source",
+          "instructions": [
+            "Crear `crates/gx_core/src/models.rs` struct ParsedLine con campos: source, content, number, raw, stripped, lower, clean, clean_lower, has_ampersand, has_equal, has_where, has_for_each, has_sub, has_if, has_case, has_do (exactamente como base.py:18)",
+            "Implementar `ParsedLine::from_source(source: SourceLine) -> Self` que hace `STRING_COMMENT_PATTERN.replace_all(raw, \"\")` una sola vez, calcula stripped/lower/clean y flags con `clean_lower.contains(...)` (igual que base.py:70)",
+            "Mantener compatibilidad legado: `line_number()` y `line_content()` getters",
+            "Benchmark: crear test con 10k líneas y verificar <5ms (vs Python ~20ms)"
+          ],
+          "acceptanceCriteria": [
+            "Test con `SourceLine{1, '  For Each Customer // comment'}` => stripped='For Each Customer', clean='For Each Customer', has_for_each=true, has_where=false",
+            "Test con `'&MyVar = \"hello // not comment\" // real comment'` => clean sin strings ni comment final",
+            "No regla puede llamar a `STRING_COMMENT_PATTERN` directamente, solo usa `line.clean`"
+          ],
+          "crate": "gx_core",
+          "files": ["crates/gx_core/src/models.rs"]
+        }
+      ]
+    },
+    {
+      "id": "EPIC-03",
+      "title": "Almacenamiento SQLite - Parámetros Necesarios",
+      "description": "Implementar gx_storage con rusqlite bundled, migrations y DAOs. Reemplaza config/rules.json y Reglas.csv runtime. Almacena parámetros necesarios según requerimiento: reglas enabled, thresholds, preferencias UI, historial auditorías.",
+      "priority": "Máxima",
+      "stories": [
+        {
+          "id": "ST-03.1",
+          "title": "Conexión y migrations runner",
+          "instructions": [
+            "Crear `crates/gx_storage/src/db.rs` con `pub fn get_db_path() -> PathBuf` usando `directories::ProjectDirs::from(\"com\",\"GX\",\"Linter\")` -> `data_dir()/gx_linter.db`; fallback a `./data/gx_linter.db` si None",
+            "Crear `pub fn init_db() -> Result<Connection>` que crea directorio padre, abre Connection, ejecuta `PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;` y corre `rusqlite_migration::Migrations::new(vec![M::from_directory(\"migrations\")]).to_latest(conn)`",
+            "Añadir `pub fn get_pool() -> r2d2::Pool<SqliteConnectionManager>` para uso GUI thread-safe",
+            "Crear `migrations/V001__initial_schema.sql` y `V002__seed_rules_and_settings.sql` con el SQL del campo `ddl.migrations` de este JSON literalmente",
+            "Test integración: `init_db` en temp dir crea 4 tablas + view + triggers y `SELECT count(*) FROM rules` >=30"
+          ],
+          "acceptanceCriteria": [
+            "DB se crea automáticamente al primer `cargo run` sin intervención",
+            "`rusqlite_migration` reporta `Current version: 2`",
+            "Triggers `trg_rules_updated_at` funcionan (UPDATE cambia updated_at)"
+          ],
+          "crate": "gx_storage",
+          "files": ["crates/gx_storage/src/db.rs", "migrations/V001__initial_schema.sql", "migrations/V002__seed_rules_and_settings.sql"]
+        },
+        {
+          "id": "ST-03.2",
+          "title": "DAO Rules y Settings (parámetros)",
+          "instructions": [
+            "Crear `crates/gx_storage/src/dao/rules_dao.rs` con `struct RuleRecord` mapeando tabla rules y métodos: `load_rule_config(conn) -> HashMap<String,bool>`, `is_rule_enabled(conn, rule_id) -> bool` (default true salvo default_disabled list), `set_enabled(conn, id, bool)`, `get_all(conn) -> Vec<RuleRecord>`, `get_enabled_ids(conn) -> Vec<String>`",
+            "Implementar `is_rule_enabled` con lógica idéntica a rule_config_service.py:131 default_disabled = {GX.1.1, GX.1.2, GX.1.3.1, GX.1.4.1, GX.1.4.2, GX.1.6.1, GX.1.6.2, GX.1.7.1} => si no está en DB, enabled = false para esos, true resto",
+            "Crear `crates/gx_storage/src/dao/settings_dao.rs` con `get(conn, key) -> Option<String>`, `set(conn, key, value, type)`, `get_int`, `get_float`, helpers `get_qg_threshold() -> f32` (default 10.0), `get_max_errors()`, `get_max_warnings()`",
+            "Crear `crates/gx_storage/src/dao/audit_dao.rs` con `insert_run(conn, &AuditRun) -> i64`, `insert_issues(conn, run_id, &[Issue])`, `list_runs(limit)`, `get_issues_for_run(run_id)`"
+          ],
+          "acceptanceCriteria": [
+            "`load_rule_config` lee `config/rules.json` legacy si existe y hace `INSERT OR IGNORE` para migrar datos antiguos una vez",
+            "Test: deshabilitar GX.2.3, recargar, `is_rule_enabled(\"GX.2.3\")==false`",
+            "Test: `get_qg_threshold()` devuelve 10.0 si no existe key, valor DB si existe"
+          ],
+          "crate": "gx_storage",
+          "files": ["crates/gx_storage/src/dao/rules_dao.rs", "crates/gx_storage/src/dao/settings_dao.rs", "crates/gx_storage/src/dao/audit_dao.rs", "crates/gx_storage/src/dao/mod.rs"]
+        },
+        {
+          "id": "ST-03.3",
+          "title": "Seed desde Reglas.csv",
+          "instructions": [
+            "Implementar `crates/gx_storage/src/seed.rs` función `import_reglas_csv(conn, csv_path)` exactamente según `ddl.seedProcedure.steps` de este JSON",
+            "Usar `csv::ReaderBuilder::new().flexible(true).trim(csv::Trim::All).from_path()` y regex `r\"^\\s*(\\d+(?:\\.\\d+)*)\"` para extraer raw_id igual que sync_rules.py:507",
+            "Mapear triggers hardcodeados según tabla en seedProcedure.steps[3] (basada en código Python real, NO en HEURISTIC_TEMPLATES legacy)",
+            "Añadir bin `cargo run -p gx_storage --bin seed -- --csv Reglas.csv` o comando `gx --seed`",
+            "Al iniciar app, si `SELECT COUNT(*) FROM rules WHERE is_abstract=0` ==0, auto-ejecutar seed"
+          ],
+          "acceptanceCriteria": [
+            "Tras `import_reglas_csv` con Reglas.csv del repo, `SELECT COUNT(*) FROM rules WHERE is_abstract=0` == 25 (mismo que sync_rules.py rule_count)",
+            "Re-ejecutar seed no duplica ni resetea enabled (preserva COALESCE)",
+            "Test con Reglas.csv modificado (cambiar descripción) actualiza description pero no enabled"
+          ],
+          "crate": "gx_storage",
+          "files": ["crates/gx_storage/src/seed.rs"]
+        }
+      ]
+    },
+    {
+      "id": "EPIC-04",
+      "title": "Filesystem y XPZ Extractor",
+      "description": "Portar gx_linter/app/core/filesystem.py y xpz_extractor.py a Rust con walkdir+rayon y zip+quick-xml.",
+      "priority": "Alta",
+      "stories": [
+        {
+          "id": "ST-04.1",
+          "title": "Filesystem: validate y find_source_files",
+          "instructions": [
+            "Crear `crates/gx_core/src/filesystem.rs` con `pub struct Filesystem; impl Filesystem { validate_directory(path: &str)->Result<PathBuf>, validate_file(path: &str)->Result<PathBuf>, find_source_files(path: &Path)->Vec<PathBuf> }`",
+            "validate_* debe retornar `anyhow::Error` con mensajes idénticos a filesystem.py:15 ('El path proporcionado está vacío.')",
+            "find_source_files: si path.is_file() => vec![path]; sino `WalkDir::new(path).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file() && !e.file_name().to_string_lossy().starts_with('.'))` y filtrar extensiones `{\".txt\",\".prg\",\".gxd\",\".src\",\".xpz\",\".xml\"}` case-insensitive o sin suffix, fallback a excluir `{\".py\",\".pyc\",\".csv\",\".pdf\",\".md\"}` igual que filesystem.py:70",
+            "Ordenar resultado con `sort()` y usar `rayon` si se integra con engine para evaluar múltiples archivos en paralelo"
+          ],
+          "acceptanceCriteria": [
+            "Test: `find_source_files` en dir con 2 .txt y 1 .xpz encuentra 3",
+            "Test: `validate_directory(\"\")` err == 'El path proporcionado está vacío.'",
+            "No usa `std::fs::read_dir` recursivo manual, usa `walkdir`"
+          ],
+          "crate": "gx_core",
+          "files": ["crates/gx_core/src/filesystem.rs"]
+        },
+        {
+          "id": "ST-04.2",
+          "title": "XPZ Extractor: unify extract_genexus_source",
+          "instructions": [
+            "Crear `crates/gx_core/src/xpz_extractor.rs` con funciones públicas: `extract_genexus_source(path: &Path)->Result<String>`, `extract_source_from_xpz(path)->Result<String>`, `extract_source_from_xml(path)->Result<String>`, `list_xpz_members(path)->Result<Vec<String>>`",
+            "extract_genexus_source despacha por `path.extension().to_lower()` igual que xpz_extractor.py:86: .xpz => xpz, .xml => xml, _ => `fs::read_to_string` con `encoding_rs` fallback",
+            "Xp z: verificar `zip::ZipArchive::new(File::open)` es válido, iterar members ignorando dirs, leer con `zip.by_name`, decodificar con `_decode_bytes` que prueba utf-8, utf-8-sig (strip BOM), latin1, cp1252 via `encoding_rs::Encoding::for_label` igual que _decode_bytes",
+            "Buscar CDATA con regex `r\"<Events>\\s*<!\\[CDATA\\[(.*?)]]>\\s*</Events>\"` DOTALL | IGNORECASE (EVENTS_CDATA_RE) y concatenar con header `// === [XPZ] Objeto: {member} ===\\n` igual que xpz_extractor.py:178",
+            "XML: buscar todos los matches `EVENTS_CDATA_RE.find_iter` y join con `\\n\\n`, fallback a contenido raw si no hay CDATA",
+            "list_xpz_members usa `archive.file_names().map(|s| s.to_string()).collect()`"
+          ],
+          "acceptanceCriteria": [
+            "Test con ejemplo_codigo.txt => extract_genexus_source retorna contenido idéntico a `read_to_string`",
+            "Test con .xpz dummy (zip con 2 xml con CDATA) => 2 bloques concatenados con headers",
+            "Test con .xml sin CDATA => fallback raw y log warning via tracing::warn!",
+            "Todos los errores usan `thiserror::Error` con variantes `NotFound`, `InvalidZip`, `Empty`"
+          ],
+          "crate": "gx_core",
+          "files": ["crates/gx_core/src/xpz_extractor.rs"]
+        }
+      ]
+    },
+    {
+      "id": "EPIC-05",
+      "title": "Motor de Reglas: Trait, Registro y Runtime",
+      "description": "Portar gx_linter/app/rules/base.py Rule + gx_linter/app/engine/runtime.py completo. Incluye discovery, dispatch y métricas.",
+      "priority": "Máxima",
+      "stories": [
+        {
+          "id": "ST-05.1",
+          "title": "Definir trait Rule y helpers",
+          "instructions": [
+            "Crear `crates/gx_rules/src/base.rs` con `pub trait Rule: Send+Sync { fn id(&self)->&'static str; fn name(&self)->&'static str; fn severity(&self)->Severity; fn description(&self)->&'static str; fn triggers(&self)->&'static [&'static str] {&[]} fn is_abstract(&self)->bool {false} fn reset(&mut self, file: &Path); fn evaluate(&mut self, line: &ParsedLine, ctx: &AuditContext)->Vec<Issue>; fn finalize(&mut self, ctx: &AuditContext)->Vec<Issue> {vec![]} }`",
+            "Implementar `fn create_issue(&self, line: &ParsedLine, override: Option<&str>) -> Issue` que usa `self.id()`, `self.severity()`, `line.number`, `line.content`, `override.unwrap_or(self.description())`, `self.current_file_path` (almacenado en `reset`) igual que base.py:213",
+            "Añadir `current_file_path: Option<PathBuf>` field via `BaseRule` struct que cada regla compone o blanket impl",
+            "Derivar `Clone` no requerido porque Box<dyn Rule> mutará",
+            "Crear `crates/gx_rules/src/helpers.rs` con helpers consolidados de reglas duplicadas: `pub fn is_where_continuation(line: &ParsedLine) -> bool` (duplicado en rule_gx_2_1/2_2/2_4/2_5.py), `pub const BODY_KEYWORDS: &[&str] = &[\"for each\",\"endfor\",\"if\",\"else\",\"endif\",\"do\",\"enddo\",\"case\",\"otherwise\",\"endcase\"]` (duplicado en 4 archivos), re-exportar `has_logical_operator` de gx_core::regex_cache"
+          ],
+          "acceptanceCriteria": [
+            "Cada regla struct implementa `Rule` y expone `id` como `GX.<raw>` (ej GX.1.1)",
+            "`create_issue` acepta &ParsedLine y funciona aunque line sea SourceLine vieja (via From)"
+          ],
+          "crate": "gx_rules",
+          "files": ["crates/gx_rules/src/base.rs", "crates/gx_rules/src/helpers.rs"]
+        },
+        {
+          "id": "ST-05.2",
+          "title": "Registro estático de reglas",
+          "instructions": [
+            "Crear `crates/gx_rules/src/lib.rs` con `pub fn all_rules() -> Vec<Box<dyn Rule>>` que retorna vec con `Box::new(RuleGx1_1::new())` para las 30 reglas (24 ejecutables + 6 abstractas con is_abstract true)",
+            "Añadir `pub fn discover_rule_ids() -> Vec<&'static str>` para UI",
+            "No usar `inventory` ni reflection; registro manual garantiza orden determinístico `sorted` igual que runtime.py:111 `sorted(_RULES_DIR.iterdir())`",
+            "Cada regla en `crates/gx_rules/src/rules/rule_gx_*.rs` debe ser `pub struct RuleGx1_1 { current_file: Option<PathBuf>, state... }`"
+          ],
+          "acceptanceCriteria": [
+            "`all_rules().len()==30` y `all_rules().iter().filter(|r| !r.is_abstract()).count()==24`",
+            "`all_rules()[0].id()==\"GX.1\"` si orden sorted (verificar orden)"
+          ],
+          "crate": "gx_rules",
+          "files": ["crates/gx_rules/src/lib.rs", "crates/gx_rules/src/rules/mod.rs"]
+        },
+        {
+          "id": "ST-05.3",
+          "title": "Runtime: load_rules, dispatch, evaluate_file",
+          "instructions": [
+            "Crear `crates/gx_engine/src/runtime.rs` con constantes `pub const DEFAULT_TRIGGER: &str = \"*\"` y `pub static TRIGGER_MAP: LazyLock<HashMap<&str, fn(&ParsedLine)->bool>>` mapeando 'where'=>|l| l.has_where etc igual que runtime.py:64",
+            "Implementar `pub fn load_rules(conn: &Connection) -> Result<(Vec<Box<dyn Rule>>, HashMap<String, Vec<usize>>)` que llama `gx_rules::all_rules()`, filtra `is_abstract`, filtra con `RuleDao::is_rule_enabled`, construye `dispatch_map: HashMap<String, Vec<usize>>` indexando por `rule.triggers()` o DEFAULT_TRIGGER si vacío, igual que runtime.py:175",
+            "Implementar `pub fn collect_candidate_rules<'a>(parsed: &ParsedLine, dispatch: &HashMap<String, Vec<usize>>, all: &'a [Box<dyn Rule>]) -> HashSet<usize>` con lógica 3 pasos: 1) DEFAULT_TRIGGER, 2) por cada trigger flag true añadir dispatch[trigger], 3) fallback a todos si vacío (runtime.py:219)",
+            "Implementar `pub fn evaluate_file(path: &Path, rules: &mut [Box<dyn Rule>], dispatch: &HashMap<...>, ctx: &AuditContext) -> Result<(Vec<Issue>, u128)>` que hace: (1) `for r in rules.iter_mut() { r.reset(path) }` (en Python lo hace el caller, aquí consolidamos), (2) `extract_genexus_source`, (3) `splitlines`, (4) `time::Instant::now()`, (5) loop `for (idx, content) in lines.iter().enumerate()` con break si `content.to_lowercase().contains(\"generated subroutines (public)\")`, crea `SourceLine`+`ParsedLine::from_source`, skip si `stripped.is_empty()`, obtiene `candidates`, itera `rules[idx].evaluate(parsed, ctx)` y acumula issues, (6) `for r in rules { issues.extend(r.finalize(ctx)) }`, (7) log `tracing::info!(\"[ENGINE] {} — {} lines | {} rule-evaluations | {}\"` ) con elapsed_ms",
+            "Implementar `pub fn build_metrics(issues: &[Issue]) -> AuditMetrics` contando severities igual que runtime.py:376"
+          ],
+          "acceptanceCriteria": [
+            "Test con `ejemplo_codigo.txt` (71 líneas) retorna `total_findings` igual que Python (verificar manualmente ejecutando python main.py --file ejemplo_codigo.txt) - debe coincidir ±1",
+            "Test que `collect_candidate_rules` para línea `where CustomerStatus = ...` incluye reglas 2.1,2.2,2.4 y DEFAULT_TRIGGER",
+            "Log `[ENGINE]` idéntico formato runtime.py:356"
+          ],
+          "crate": "gx_engine",
+          "files": ["crates/gx_engine/src/runtime.rs", "crates/gx_engine/src/dispatch.rs", "crates/gx_engine/src/lib.rs"]
+        },
+        {
+          "id": "ST-05.4",
+          "title": "Paralelismo multi-archivo (opcional)",
+          "instructions": [
+            "Añadir `pub fn evaluate_files_parallel(paths: &[PathBuf], ctx: &AuditContext) -> Vec<(PathBuf, Vec<Issue>, AuditMetrics)>` usando `rayon::par_iter` que para cada path hace `load_rules` clonado o `rules.clone_box()` (requiere `Rule: DynClone` via `dyn-clone` crate) o recrea rules por hilo",
+            "Usar `Filesystem::find_source_files` para expandir directorio a lista antes de paralelizar"
+          ],
+          "acceptanceCriteria": [
+            "Evaluar 10 archivos en paralelo es >2x más rápido que secuencial en máquina 4 cores",
+            "No hay data race en `rules` estado porque cada hilo tiene su copia"
+          ],
+          "crate": "gx_engine",
+          "files": ["crates/gx_engine/src/runtime.rs"]
+        }
+      ]
+    },
+    {
+      "id": "EPIC-06",
+      "title": "Catálogo de Reglas (30 reglas)",
+      "description": "Portar las 30 reglas rule_gx_*.py a Rust. Cada regla debe mantener estado, triggers y lógica idéntica a los ficheros rule_gx_*.py existentes (NO a HEURISTIC_TEMPLATES que es legacy). Incluye 6 abstractas.",
+      "priority": "Máxima",
+      "stories": [
+        {
+          "id": "ST-06.1",
+          "title": "Reglas abstractas (nodos agrupadores)",
+          "instructions": [
+            "Crear `rule_gx_1.rs`, `rule_gx_1_4.rs`, `rule_gx_1_6.rs`, `rule_gx_1_7.rs`, `rule_gx_2_0.rs`, `rule_gx_2_7.rs` con `fn is_abstract(&self)->bool {true}` y `evaluate` que retorna `vec![]`",
+            "Asegurar `load_rules` las filtra"
+          ],
+          "acceptanceCriteria": ["`all_rules` las incluye pero `load_rules` no las retorna en dispatch_map"],
+          "crate": "gx_rules",
+          "files": ["crates/gx_rules/src/rules/rule_gx_1.rs", "crates/gx_rules/src/rules/rule_gx_1_4.rs", "crates/gx_rules/src/rules/rule_gx_1_6.rs", "crates/gx_rules/src/rules/rule_gx_1_7.rs", "crates/gx_rules/src/rules/rule_gx_2_0.rs", "crates/gx_rules/src/rules/rule_gx_2_7.rs"]
+        },
+        {
+          "id": "ST-06.2",
+          "title": "Reglas WARNING 1.x (advertencias)",
+          "instructions": [
+            "Portar una por una con triggers exactos: `GX.1.1` triggers [\"&\"] usa `VARIABLE_LOWERCASE_PATTERN` sobre `line.clean` igual que rule_gx_1_1.py:36; `GX.1.2` depth tracking indentación 4 espacios (sync_rules.py 1.2); `GX.1.3` for each sin índice; `GX.1.3.1` where indent; `GX.1.3.2` stack if/else/endif (SIN triggers explícitos, usa DEFAULT_TRIGGER \"*\"); `GX.1.3.3` stack do case/otherwise/endcase; `GX.1.4.1` assigned_vars con distance >15; `GX.1.4.2` detectar atributos sin & en if/case; `GX.1.4.3` parm in:/out: (trigger \"*\" no \"&\"); `GX.1.5` and/or count >=3 (triggers [\"if\",\"case\"]); `GX.1.6.1` last_line_was_comment; `GX.1.6.2` last_was_sub; `GX.1.7.1` in_rules_section + finalize si no encontró headers; `GX.1.7.2` // con len<6",
+            "Cada fichero debe usar `use gx_core::regex_cache::*` y `line.clean/clean_lower/has_*` nunca `Regex::new` local",
+            "Copiar mensajes `description_override` literales igual que sync_rules.py templates para que snapshots coincidan"
+          ],
+          "acceptanceCriteria": [
+            "Test snapshot por regla: crear `tests/snapshots/rule_gx_1_1.snap` con `ejemplo_codigo.txt` línea 15 `&myvar = 5` => 1 Issue GX.1.1",
+            "Todas las reglas 1.x pasan `cargo test -p gx_rules -- rule_gx_1`"
+          ],
+          "crate": "gx_rules",
+          "files": ["crates/gx_rules/src/rules/rule_gx_1_1.rs", "crates/gx_rules/src/rules/rule_gx_1_2.rs", "crates/gx_rules/src/rules/rule_gx_1_3.rs", "crates/gx_rules/src/rules/rule_gx_1_3_1.rs", "crates/gx_rules/src/rules/rule_gx_1_3_2.rs", "crates/gx_rules/src/rules/rule_gx_1_3_3.rs", "crates/gx_rules/src/rules/rule_gx_1_4_1.rs", "crates/gx_rules/src/rules/rule_gx_1_4_2.rs", "crates/gx_rules/src/rules/rule_gx_1_4_3.rs", "crates/gx_rules/src/rules/rule_gx_1_5.rs", "crates/gx_rules/src/rules/rule_gx_1_6_1.rs", "crates/gx_rules/src/rules/rule_gx_1_6_2.rs", "crates/gx_rules/src/rules/rule_gx_1_7_1.rs", "crates/gx_rules/src/rules/rule_gx_1_7_2.rs"]
+        },
+        {
+          "id": "ST-06.3",
+          "title": "Reglas ERROR 2.x (mejores prácticas)",
+          "instructions": [
+            "Portar: `GX.2.1` where+when; `GX.2.2` where con and/or/in; `GX.2.3` stack for_each depth>2 (SIN triggers explícitos, usa DEFAULT_TRIGGER \"*\"); `GX.2.4` funciones en where via FUNCTION_CALL_PATTERN; `GX.2.5` hardcode literal con left_side & y . check; `GX.2.6` sub nullvalue tracking; `GX.2.7.1` for/do while con &i/j/k; `GX.2.7.2` &i/j/k\\s*= ; `GX.2.7.3` condition_vars set; `GX.2.7.4` var_counts finalize count==1",
+            "Para 2.7.4 asegurar `finalize` retorna Issues con line_number del primer uso igual que sync_rules.py 2.7.4",
+            "Mantener `MAX_DEPTH=2` constante en 2.3"
+          ],
+          "acceptanceCriteria": [
+            "Test con `ejemplo_codigo.txt` línea 66-68 (for each anidados nivel 3) => 1 Issue GX.2.3",
+            "Test con `where upper(CustomerName) = &ClientName` => Issue GX.2.4 con funcs=[upper]",
+            "Todas las reglas 2.x pasan `cargo test -p gx_rules -- rule_gx_2`"
+          ],
+          "crate": "gx_rules",
+          "files": ["crates/gx_rules/src/rules/rule_gx_2_1.rs", "crates/gx_rules/src/rules/rule_gx_2_2.rs", "crates/gx_rules/src/rules/rule_gx_2_3.rs", "crates/gx_rules/src/rules/rule_gx_2_4.rs", "crates/gx_rules/src/rules/rule_gx_2_5.rs", "crates/gx_rules/src/rules/rule_gx_2_6.rs", "crates/gx_rules/src/rules/rule_gx_2_7_1.rs", "crates/gx_rules/src/rules/rule_gx_2_7_2.rs", "crates/gx_rules/src/rules/rule_gx_2_7_3.rs", "crates/gx_rules/src/rules/rule_gx_2_7_4.rs"]
+        }
+      ]
+    },
+    {
+      "id": "EPIC-07",
+      "title": "Reporte PDF",
+      "description": "Portar gx_linter/app/core/reporter.py PdfAuditReporter a gx_report con printpdf. Debe generar PDF en Downloads con diseño idéntico.",
+      "priority": "Alta",
+      "stories": [
+        {
+          "id": "ST-07.1",
+          "title": "Implementar PdfAuditReporter::generate",
+          "instructions": [
+            "Crear `crates/gx_report/src/pdf.rs` con `pub struct PdfAuditReporter; impl PdfAuditReporter { pub fn generate(&self, output_name: &str, metrics: &AuditMetrics, issues: &[Issue], qg_passed: bool) -> Result<PathBuf> }`",
+            "Lógica: asegurar `output_name` ends_with .pdf sino añadir; `downloads_dir = dirs::download_dir().unwrap_or(data_dir)` crear con `fs::create_dir_all`; `final_path = downloads_dir/output_name`; manejar PermissionError con timestamp fallback igual que reporter.py:42 `format!(\"{}_{}.pdf\", stem, now.format(\"%H%M%S\"))`",
+            "Implementar `_build_pdf` con printpdf: `PdfDocument::new(\"GX Linter\", Mm(297), Mm(210), \"Layer 1\")`, definir colores C_PRIMARY (24,43,73) etc igual que reporter.py:58, fuentes Helvetica (usar `lopdf` built-in o incluir DejaVuSans), `set_margins`, `add_page` landscape A4",
+            "Header band rect 0,0,297,26 fill C_PRIMARY, texto `GENEXUS STATIC ANALYSIS LINTER - REPORTE DE AUDITORIA` y fecha `chrono::Local::now().format(\"%Y-%m-%d %H:%M:%S\")`",
+            "KPI cards 4 rects 63x18 con valores metrics.total/errors/warnings/info",
+            "Quality Gate banner rect PAGE_WIDTH x10 fill C_SUCCESS si qg_passed sino C_ERROR con texto `DICTAMEN FINAL: APROBADO PARA DESPLIEGUE` / `RECHAZADO POR QUALITY GATE`",
+            "Tabla hallazgos: col_widths [32,26,14,125,80], headers [Regla, Severidad, Línea, Descripción, Archivo], draw_header con fill C_PRIMARY, filas ordenadas por severity_order ERROR 0 WARNING 1 INFO 2, alt_row, multi_cell para desc y file, paginación si y+row_h>190 => add_page",
+            "Helper `clean_str` que hace `text.replace('\\n',' ').replace('\\r',' ').trim().encode latin1 replace` igual que reporter.py:78"
+          ],
+          "acceptanceCriteria": [
+            "Generar PDF con `ejemplo_codigo.txt` metrics (ej 12 findings) produce archivo en Downloads y `final_path.exists()`",
+            "Comparación visual: header, KPIs, banner y tabla coinciden con PDF Python (inspección manual)",
+            "Test unitario: `clean_str(\"a\\nb\")==\"a b\"` y `clean_str(\"\")==\"\"`"
+          ],
+          "crate": "gx_report",
+          "files": ["crates/gx_report/src/pdf.rs", "crates/gx_report/src/lib.rs"]
+        },
+        {
+          "id": "ST-07.2",
+          "title": "Servicio PdfService wrapper",
+          "instructions": [
+            "Crear `crates/gx_app/src/services/pdf_service.rs` con `pub struct PdfService; impl PdfService { pub fn export_pdf(file_path: &str, metrics, issues, qg, output_path: Option<&str>) -> Result<PathBuf> }` que delega a `PdfAuditReporter` y si `output_path` Some hace `fs::rename` o `fs::copy` + `remove` (igual que pdf_service.py:39 `shutil.move`)",
+            "Manejar que `output_path` puede ser ruta completa con `asksaveasfilename` desde GUI"
+          ],
+          "acceptanceCriteria": ["`export_pdf` con output_path custom mueve archivo correctamente", "`export_pdf` sin output_path retorna path en Downloads"],
+          "crate": "gx_app",
+          "files": ["crates/gx_app/src/services/pdf_service.rs"]
+        }
+      ]
+    },
+    {
+      "id": "EPIC-08",
+      "title": "CLI (clap)",
+      "description": "Portar main.py run_cli y argparse a Rust clap bin `gx`. Debe ser drop-in replacement para CI/CD.",
+      "priority": "Alta",
+      "stories": [
+        {
+          "id": "ST-08.1",
+          "title": "Implementar bin gx con clap",
+          "instructions": [
+            "Crear `crates/gx_app/src/bin/gx.rs` con `#[derive(Parser)] struct Cli { #[arg(long, required=true, value_name=\"PATH\")] file: PathBuf, #[arg(long, default_value_t=0)] max_errors: u32, #[arg(long, default_value_t=999999)] max_warnings: u32, #[arg(long, default_value_t=10.0)] qg_threshold: f32 }`",
+            "Implementar `fn run_cli(args: Cli) -> anyhow::Result<i32>` que hace: `println!(\"=== GX Auditor Desktop — Modo CLI ===\")`, valida `file.is_file()` sino `eprintln!(\"Archivo inexistente\")` y return 1, `let (mut rules, dispatch) = gx_engine::load_rules(&conn)?`, `println!(\"Reglas cargadas: {}\", rules.len())`, crea `AuditContext{project_path: file.clone(), rules_path: file.clone(), max_errors, max_warnings, qg_threshold}`, `let issues = gx_engine::evaluate_file(&file, &mut rules, &dispatch, &ctx)?` (evaluate_file internamente llama reset()), `let metrics = build_metrics(&issues)`, `let qg_passed = metrics.errors <= max_errors && metrics.warnings <= max_warnings` (CLI usa umbrales absolutos como main.py:96-99, NO porcentual), `println!(\"--- RESULTADOS ---\")` con Hallazgos/Errores/Warnings/Info/Quality Gate APROBADO/RECHAZADO, genera PDF via `PdfAuditReporter::generate(format!(\"Reporte_Auditoria_{}.pdf\", file.file_stem))`, `Ok(if qg_passed {0} else {1})`",
+            "En `main()` init `tracing_subscriber::fmt::init()`, `let conn = gx_storage::db::init_db()?`, `let args = Cli::parse(); std::process::exit(run_cli(args)?)`",
+            "Manejar `anyhow::Error` con `eprintln!(\"Error ejecutando análisis: {exc}\")` + `tracing::error!`"
+          ],
+          "acceptanceCriteria": [
+            "`cargo run -p gx_app --bin gx -- --file ejemplo_codigo.txt --max-errors 0 --max-warnings 999999` imprime Reglas cargadas, RESULTADOS, PDF generado y retorna código 1 si hay errores (igual que main.py:127)",
+            "`cargo run -- --file no_existe.txt` retorna 1 y mensaje Archivo inexistente",
+            "`--help` muestra descripción GeneXus Static Analysis Linter CLI"
+          ],
+          "crate": "gx_app",
+          "files": ["crates/gx_app/src/bin/gx.rs", "crates/gx_app/src/cli/args.rs", "crates/gx_app/src/cli/mod.rs"]
+        },
+        {
+          "id": "ST-08.2",
+          "title": "Integración con audit_runs historial desde CLI",
+          "instructions": [
+            "En `run_cli` tras `build_metrics`, persistir en SQLite: `AuditDao::insert_run` con triggered_by='cli', luego `insert_issues` con todos los issues; actualizar `duration_ms` y `pdf_path`",
+            "Añadir flag `--no-history` para omitir persistencia si se quiere modo ephemeral (útil CI)"
+          ],
+          "acceptanceCriteria": ["Tras CLI run, `SELECT * FROM audit_runs WHERE file_path LIKE '%ejemplo%'` tiene 1 fila con total_findings correcto", "`--no-history` no inserta"],
+          "crate": "gx_app",
+          "files": ["crates/gx_app/src/bin/gx.rs"]
+        }
+      ]
+    },
+    {
+      "id": "EPIC-09",
+      "title": "GUI Desktop (eframe/egui)",
+      "description": "Portar gx_linter/app/ui/main_window.py + layouts + components + dialogs + services a Rust egui. Mantener threading model AuditRunner.",
+      "priority": "Alta",
+      "stories": [
+        {
+          "id": "ST-09.1",
+          "title": "AppState y AuditEngine facade",
+          "instructions": [
+            "Crear `crates/gx_app/src/gui/state.rs` con `pub struct AppState { pub current_file: Option<PathBuf>, pub metrics: Option<AuditMetrics>, pub issues: Vec<Issue>, pub current_quality_gate: bool, pub pdf_path: Option<PathBuf> }` idéntico a ui/state/app_state.py:12",
+            "Crear `crates/gx_app/src/gui/app.rs` struct `AuditEngine { rules: Vec<Box<dyn Rule>>, dispatch: HashMap<String, Vec<usize>> }` con `fn load_rules(&mut self, conn: &Connection)` que delega a `gx_engine::load_rules`",
+            "Implementar `AuditEngine::analyze_file(&mut self, path: &Path, ctx: &AuditContext) -> Result<(Vec<Issue>, AuditMetrics, bool, PathBuf)>` que hace evaluate_file (internamente llama reset), build_metrics, `let error_pct = if metrics.total_findings > 0 { metrics.errors * 100 / metrics.total_findings } else { 0 }`, `let qg_passed = error_pct <= qg_threshold` (lee qg_threshold de DB default 10.0, usa algoritmo porcentual como main_window.py:85-91, NO umbrales absolutos del CLI), genera PDF vía `PdfAuditReporter`"
+          ],
+          "acceptanceCriteria": ["`AppState` default tiene current_file None y issues vacío", "`AuditEngine::analyze_file` con ejemplo_codigo.txt retorna metrics coherentes"],
+          "crate": "gx_app",
+          "files": ["crates/gx_app/src/gui/state.rs", "crates/gx_app/src/gui/app.rs"]
+        },
+        {
+          "id": "ST-09.2",
+          "title": "MainApplication eframe window",
+          "instructions": [
+            "Crear `crates/gx_app/src/main.rs` con `fn main() -> eframe::Result` que inicializa `tracing`, `init_db`, `seed` si necesario, `AuditEngine::load_rules`, crea `NativeOptions{ viewport: egui::ViewportBuilder::default().with_inner_size([1220.0,780.0]).with_title(\"GX Auditor Desktop\"), ..}` y `eframe::run_native(\"GX Auditor Desktop\", opts, Box::new(|cc| Box::new(MainApplication::new(cc))))`",
+            "Implementar `struct MainApplication { state: AppState, engine: AuditEngine, rt_thread: Option<JoinHandle>, pending_result: Arc<Mutex<Option<Result>>> }` con `impl eframe::App`",
+            "Layout: dividir con `egui::SidePanel::left(\"sidebar\")` (SidebarLayout) y `CentralPanel` (HeaderLayout + ContentLayout). Sidebar: botones `Ver Reglas`, `Configurar Reglas`, `Acerca de`, `Exportar PDF`, `Analizar` con estados `set_file_loaded`, `set_analyzing`, `set_finished` igual que sidebar_layout.py",
+            "Header: `egui::TextEdit::singleline` para file_path + botón `Examinar` que usa `rfd::FileDialog::new().add_filter(\"GeneXus\", &[\"xpz\",\"xml\",\"txt\"]).pick_file()` igual que FileService",
+            "Content: `egui_extras::TableBuilder` para issue_table con columnas Regla/Severidad/Línea/Descripción/Archivo, sortable por severity, doble click abre CodeViewerWindow",
+            "Quality Gate banner: `egui::Frame` con fill verde/rojo y texto `APROBADO PARA DESPLIEGUE` / `RECHAZADO`",
+            "KPI cards: 4 `Frame` con métricas total/errors/warnings/info"
+          ],
+          "acceptanceCriteria": [
+            "Ventana 1220x780 abre con sidebar y contenido vacío",
+            "Seleccionar archivo vía Examinar actualiza header y sidebar",
+            "Click Analizar deshabilita botón, muestra spinner, al terminar actualiza tabla y KPIs sin bloquear UI (60fps)"
+          ],
+          "crate": "gx_app",
+          "files": ["crates/gx_app/src/main.rs", "crates/gx_app/src/gui/mod.rs", "crates/gx_app/src/gui/app.rs", "crates/gx_app/src/gui/layouts/sidebar.rs", "crates/gx_app/src/gui/layouts/header.rs", "crates/gx_app/src/gui/layouts/content.rs", "crates/gx_app/src/gui/layouts/console.rs"]
+        },
+        {
+          "id": "ST-09.3",
+          "title": "AuditRunner threading",
+          "instructions": [
+            "Implementar `struct AuditRunner { engine: Arc<Mutex<AuditEngine>>, file_path: PathBuf, ctx: egui::Context, result_tx: Sender<Result> }` con `fn start(self)` que hace `std::thread::spawn(move || { let res = engine.lock().unwrap().analyze_file(&file_path); tx.send(res); ctx.request_repaint(); })` igual que main_window.py:131 `threading.Thread daemon=True` + `master.after(0, on_success)`",
+            "En `MainApplication::update` poll `result_rx.try_recv()` y si Some(Ok((issues,metrics,qg,pdf))) llamar `on_audit_success` que actualiza `self.state` y muestra `egui::Window` modal `Análisis completado. Hallazgos: N`",
+            "Manejar error con `tracing::error!` y `egui::Window` error modal"
+          ],
+          "acceptanceCriteria": ["Análisis de archivo 5k líneas no congela UI (verificar moviendo ventana durante análisis)", "on_success actualiza tabla y pdf_path, on_error muestra modal"],
+          "crate": "gx_app",
+          "files": ["crates/gx_app/src/gui/app.rs"]
+        },
+        {
+          "id": "ST-09.4",
+          "title": "Diálogos y componentes",
+          "instructions": [
+            "Crear `crates/gx_app/src/gui/dialogs/rules_dialog.rs` con `egui::Window` que lista `engine.rules` con id, name, severity, description (igual que RulesDialog)",
+            "Crear `rule_config_dialog.rs` con `egui::Window` + `ScrollArea` + `Checkbox` por regla linked a `RuleDao::set_enabled`; al guardar recarga `engine.load_rules` via callback `on_save` igual que main_window.py:232 `RuleConfigDialog(self, on_save=_reload_rules)`",
+            "Crear `about.rs` con info versión",
+            "Crear `components/issue_table.rs` con `TableBuilder` y `code_viewer.rs` con `egui::ScrollArea` + `SyntaxHighlight` simple y `Label` para rule_id/description igual que CodeViewerWindow",
+            "Crear `services/file_service.rs` wrapper `rfd::FileDialog` y `services/pdf_service.rs` ya definido"
+          ],
+          "acceptanceCriteria": ["RulesDialog muestra 24 reglas con severidad coloreada", "RuleConfigDialog persiste en SQLite y recarga engine sin reiniciar app", "Doble click en issue abre CodeViewer con file_path y line_number highlight"],
+          "crate": "gx_app",
+          "files": ["crates/gx_app/src/gui/dialogs/rules_dialog.rs", "crates/gx_app/src/gui/dialogs/rule_config_dialog.rs", "crates/gx_app/src/gui/dialogs/about.rs", "crates/gx_app/src/gui/components/issue_table.rs", "crates/gx_app/src/gui/components/quality_gate.rs", "crates/gx_app/src/gui/components/summary_card.rs", "crates/gx_app/src/gui/components/code_viewer.rs", "crates/gx_app/src/services/file_service.rs"]
+        }
+      ]
+    },
+    {
+      "id": "EPIC-10",
+      "title": "Empaquetado, QA, Migración Datos y Corte",
+      "description": "Verificación paridad Python vs Rust, migración config/rules.json, y entrega final sin Python runtime.",
+      "priority": "Alta",
+      "stories": [
+        {
+          "id": "ST-10.1",
+          "title": "Suite de paridad y snapshots",
+          "instructions": [
+            "Crear `tests/parity.rs` que ejecuta `python main.py --file ejemplo_codigo.txt` y `cargo run --bin gx -- --file ejemplo_codigo.txt` y compara `metrics.errors/warnings/total` y lista de `rule_id` ordenada; deben coincidir",
+            "Crear `tests/snapshots/` con `insta` para cada regla: input `.txt` mínimo que dispara regla y `assert_snapshot!(issues)`",
+            "Añadir `tests/xpz.rs` con .xpz dummy y .xml con CDATA y verificar `extract_genexus_source` extrae mismo contenido que Python",
+            "Ejecutar `cargo test --workspace` debe pasar todos"
+          ],
+          "acceptanceCriteria": ["Paridad test con ejemplo_codigo.txt pasa (mismo número hallazgos por severidad)", "Insta snapshots generados para 25 reglas", "CI falla si snapshot diverge"],
+          "files": ["tests/parity.rs", "tests/snapshots/*.snap", "tests/xpz.rs"]
+        },
+        {
+          "id": "ST-10.2",
+          "title": "Migración datos legacy",
+          "instructions": [
+            "Al primer arranque, detectar si `config/rules.json` existe y `SELECT COUNT(*) FROM rules` ya tiene datos: leer `rules.json` con `serde_json`, para cada `k,v` hacer `UPDATE rules SET enabled=? WHERE id=?` (preserva migración usuario)",
+            "Si `Reglas.csv` existe y hash distinto a `app_settings.seed_csv_hash`, re-ejecutar `import_reglas_csv` (upsert) y log `Reglas sincronizadas` igual que sync_rules.py:594",
+            "Documentar en `docs/migration.md` pasos para usuarios: copiar `Reglas.csv` y `config/rules.json` al nuevo dir data, ejecutar `gx --seed`"
+          ],
+          "acceptanceCriteria": ["Usuario con `config/rules.json` custom mantiene sus enabled/disabled tras migrar", "Reglas.csv actualizado refleja nuevas descripciones sin perder enabled"],
+          "files": ["crates/gx_storage/src/db.rs", "docs/migration.md"]
+        },
+        {
+          "id": "ST-10.3",
+          "title": "Build release y verificación instalador",
+          "instructions": [
+            "Ejecutar `cargo build --release` y verificar `target/release/gx.exe` y `target/release/gx_linter_gui.exe` existen, tamaño <20MB, `ldd` no depende de Python",
+            "Crear instalador con `cargo install cargo-wix` o `cargo bundle --release` que genere `GX_Linter.msi` con icono y shortcut; probar instalación en Windows sandbox",
+            "Verificar PDF generado abre en Adobe Reader sin error PermissionError (reproducir escenario Windows archivo bloqueado con timestamp fallback)",
+            "Marcar repo Python como archivado y README apunta a `gx-linter-rs`"
+          ],
+          "acceptanceCriteria": [
+            "Instalador MSI instala y desinstala limpio, crea entrada menú inicio",
+            "PDF se abre y contiene KPIs y tabla hallazgos",
+            "No queda dependencia runtime Python/pandas/fpdf2/customtkinter"
+          ],
+          "files": ["wix/main.wxs", "Cargo.toml (bundle metadata)"]
+        }
+      ]
+    }
+  ],
+  "buildInstructions": {
+    "prerequisites": ["Rust stable 1.77+", "cargo, rustfmt, clippy", "Windows 10/11 con WebView2 si usa tauri (no necesario para eframe)", "No requiere Python"],
+    "firstRun": [
+      "git clone <new-repo> gx-linter-rs && cd gx-linter-rs",
+      "cargo check --workspace",
+      "cargo run -p gx_app --bin gx -- --file ../genexus-linter-python/ejemplo_codigo.txt --max-errors 0 --max-warnings 999999",
+      "cargo run -p gx_app --bin gx_linter_gui  # abre GUI",
+      "cargo test --workspace"
+    ],
+    "release": [
+      "cargo build --release",
+      "ls -lh target/release/gx.exe target/release/gx_linter_gui.exe",
+      "cargo wix --nocapture  # genera MSI en target/wix/"
+    ],
+    "seed": [
+      "cargo run -p gx_storage -- --seed --csv ../genexus-linter-python/Reglas.csv",
+      "sqlite3 %APPDATA%/GX/Linter/gx_linter.db \"SELECT id,enabled FROM rules ORDER BY id;\""
+    ]
+  },
+  "qualityGates": {
+    "cliAlgorithm": "qg_passed = metrics.errors <= max_errors AND metrics.warnings <= max_warnings (umbrales absolutos, main.py:96-99). NO usa porcentaje.",
+    "guiAlgorithm": "error_pct = errors*100/total; qg_passed = error_pct <= qg_threshold_pct (default 10.0 de app_settings). main_window.py:85-91.",
+    "note": "CLI y GUI usan ALGORITMOS DISTINTOS. Rust debe implementar ambos y seleccionar según entrypoint. El CLI NO es drop-in replacement del QG de la GUI.",
+    "storage": "app_settings.qg_threshold_pct y audit_runs.qg_threshold_pct (snapshot al momento del run, usado solo por GUI)",
+    "cliOverrides": "CLI permite --max-errors, --max-warnings, --qg-threshold (este último solo para compatibilidad futura, no se usa en el QG actual de Python CLI)"
+  },
+  "nonFunctionalRequirements": {
+    "performance": "ParsedLine sanitización una sola vez, dispatch por flags, rayon para multi-archivo, regex LazyLock, target <100ms para 1k líneas",
+    "compatibility": "Soporta .txt .xml .xpz igual que xpz_extractor.py, encoding utf-8/latin1/cp1252, break en 'generated subroutines (public)'",
+    "security": "SQLite WAL, foreign_keys ON, no SQL injection (prepared statements), file picker valida is_file"
+  },
+  "openQuestionsForProductOwner": [
+    "¿GUI eframe/egui inmediato o prefieren tauri web para facilitar diseñador CSS?",
+    "¿Histórico audit_runs debe retenerse cuánto tiempo? ¿Purge automático 90 días?",
+    "¿Reglas.csv seguirá editable por negocio tras migración o la DB es fuente de verdad?",
+    "¿Necesitan exportar historial a CSV/Excel además de PDF?"
+  ]
+}

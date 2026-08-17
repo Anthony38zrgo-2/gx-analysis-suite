@@ -1,0 +1,24 @@
+[package]
+name = "gx_app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "gx"
+path = "src/bin/gx.rs"
+
+[[bin]]
+name = "gx_linter_gui"
+path = "src/main.rs"
+
+[dependencies]
+gx_core = { path = "../gx_core" }
+gx_engine = { path = "../gx_engine" }
+gx_storage = { path = "../gx_storage" }
+gx_report = { path = "../gx_report" }
+gx_rules = { path = "../gx_rules" }
+clap = { version = "4.5", features = ["derive"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
