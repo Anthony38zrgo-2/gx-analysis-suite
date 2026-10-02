@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -152,6 +153,24 @@ pub fn build_metrics(issues: &[Issue]) -> AuditMetrics {
     AuditMetrics::from_issues(issues)
 }
 
+/// Progreso neutral por archivo (GX-016): el engine no conoce tipos de UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileProgressState {
+    /// Archivo descubierto, aún sin evaluar.
+    Pending,
+    /// Escaneado con éxito (posiblemente con 0 hallazgos).
+    Ok { findings: usize },
+    /// Fallo explícito del archivo (nunca un resultado limpio).
+    Error { message: String },
+}
+
+/// Evento de progreso por archivo durante un [`analyze_with_progress`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileProgress {
+    pub path: PathBuf,
+    pub state: FileProgressState,
+}
+
 /// Análisis completo según una solicitud serializable (GX-010).
 ///
 /// - Descubre archivos por input (archivo único o directorio recursivo con
@@ -162,6 +181,22 @@ pub fn build_metrics(issues: &[Issue]) -> AuditMetrics {
 ///   veredicto de la política (`Pass`/`Reject`).
 /// - El orden de hallazgos es determinista y estable sin importar SQLite.
 pub fn analyze(request: &AnalysisRequest) -> AnalysisResult {
+    analyze_with_progress(request, None, None)
+}
+
+/// [`analyze`] con hooks opcionales de progreso y cancelación (GX-016).
+///
+/// - `on_progress` recibe `Pending` por archivo descubierto y `Ok`/`Error`
+///   al terminar cada archivo (los callbacks pueden ejecutarse desde hilos
+///   de rayon, en cualquier orden de finalización).
+/// - `cancel` se consulta antes de evaluar cada archivo; los archivos no
+///   iniciados se reportan como `ScanFailure` "cancelado por el usuario", de
+///   modo que una cancelación nunca produce un resultado limpio.
+pub fn analyze_with_progress(
+    request: &AnalysisRequest,
+    on_progress: Option<&(dyn Fn(FileProgress) + Sync)>,
+    cancel: Option<&AtomicBool>,
+) -> AnalysisResult {
     let enabled: HashSet<String> = request.enabled_rule_ids.iter().cloned().collect();
     let mut inputs: Vec<PathBuf> = Vec::new();
     let mut failures: Vec<ScanFailure> = Vec::new();
@@ -179,6 +214,15 @@ pub fn analyze(request: &AnalysisRequest) -> AnalysisResult {
         }
     }
 
+    if let Some(cb) = on_progress {
+        for path in &inputs {
+            cb(FileProgress {
+                path: path.clone(),
+                state: FileProgressState::Pending,
+            });
+        }
+    }
+
     // Un contexto por corrida: umbrales desde la política (compatibilidad
     // con reglas que leen ctx).
     let (max_errors, max_warnings, qg_threshold_pct) = match &request.policy {
@@ -189,14 +233,20 @@ pub fn analyze(request: &AnalysisRequest) -> AnalysisResult {
         gx_core::models::QgPolicy::Percentage { max_error_pct } => (0, u32::MAX, *max_error_pct),
     };
 
-    let outcomes = evaluate_files_parallel_with_ctx(&inputs, &enabled, |path| AuditContext {
-        project_path: path.to_path_buf(),
-        rules_path: path.to_path_buf(),
-        max_errors,
-        max_warnings,
-        qg_threshold_pct,
-        extra_settings: Default::default(),
-    });
+    let outcomes = evaluate_files_parallel_with_ctx(
+        &inputs,
+        &enabled,
+        |path| AuditContext {
+            project_path: path.to_path_buf(),
+            rules_path: path.to_path_buf(),
+            max_errors,
+            max_warnings,
+            qg_threshold_pct,
+            extra_settings: Default::default(),
+        },
+        on_progress,
+        cancel,
+    );
 
     let mut findings: Vec<Issue> = Vec::new();
     let mut scanned_files: usize = 0;
@@ -242,6 +292,16 @@ pub struct FileScanOutcome {
     pub error: Option<String>,
 }
 
+/// Whether `rule_id` is a concrete rule compiled into the registry.
+///
+/// Frontera del desktop (GX-016): un id desconocido NUNCA se ignora en
+/// silencio (a diferencia de `build_rules`, que filtra lo que no conoce).
+pub fn is_known_rule(rule_id: &str) -> bool {
+    gx_rules::all_rules()
+        .iter()
+        .any(|r| !r.is_abstract() && r.id() == rule_id)
+}
+
 /// Build rules + dispatch plan from an explicit enabled set, without
 /// touching SQLite. Used for deterministic tests, read-only scans and
 /// parallelism.
@@ -270,14 +330,16 @@ pub fn evaluate_files_parallel(
     enabled_ids: &HashSet<String>,
     ctx: &AuditContext,
 ) -> Vec<FileScanOutcome> {
-    evaluate_files_parallel_with_ctx(paths, enabled_ids, |_p| ctx.clone())
+    evaluate_files_parallel_with_ctx(paths, enabled_ids, |_p| ctx.clone(), None, None)
 }
 
-/// Variante con contexto por archivo (usada por [`analyze`]).
+/// Variante con contexto por archivo, progreso y cancelación (GX-016).
 fn evaluate_files_parallel_with_ctx<F>(
     paths: &[PathBuf],
     enabled_ids: &HashSet<String>,
     ctx_factory: F,
+    on_progress: Option<&(dyn Fn(FileProgress) + Sync)>,
+    cancel: Option<&AtomicBool>,
 ) -> Vec<FileScanOutcome>
 where
     F: Fn(&Path) -> AuditContext + Sync,
@@ -286,25 +348,49 @@ where
     paths
         .par_iter()
         .map(|p| {
-            let (mut rules, dispatch) = build_rules(enabled_ids);
-            let ctx = ctx_factory(p);
-            match run_file(&mut rules, &dispatch, p, &ctx) {
-                Ok((issues, _)) => {
-                    let metrics = AuditMetrics::from_issues(&issues);
-                    FileScanOutcome {
-                        path: p.clone(),
-                        issues,
-                        metrics,
-                        error: None,
-                    }
-                }
-                Err(e) => FileScanOutcome {
+            let outcome = if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+                FileScanOutcome {
                     path: p.clone(),
                     issues: Vec::new(),
                     metrics: AuditMetrics::default(),
-                    error: Some(e.to_string()),
-                },
+                    error: Some("cancelado por el usuario".to_string()),
+                }
+            } else {
+                let (mut rules, dispatch) = build_rules(enabled_ids);
+                let ctx = ctx_factory(p);
+                match run_file(&mut rules, &dispatch, p, &ctx) {
+                    Ok((issues, _)) => {
+                        let metrics = AuditMetrics::from_issues(&issues);
+                        FileScanOutcome {
+                            path: p.clone(),
+                            issues,
+                            metrics,
+                            error: None,
+                        }
+                    }
+                    Err(e) => FileScanOutcome {
+                        path: p.clone(),
+                        issues: Vec::new(),
+                        metrics: AuditMetrics::default(),
+                        error: Some(e.to_string()),
+                    },
+                }
+            };
+
+            if let Some(cb) = on_progress {
+                cb(FileProgress {
+                    path: p.clone(),
+                    state: match &outcome.error {
+                        None => FileProgressState::Ok {
+                            findings: outcome.issues.len(),
+                        },
+                        Some(message) => FileProgressState::Error {
+                            message: message.clone(),
+                        },
+                    },
+                });
             }
+            outcome
         })
         .collect()
 }

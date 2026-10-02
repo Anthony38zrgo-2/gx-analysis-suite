@@ -12,7 +12,8 @@ Este repositorio (`gx-linter-rs`) es el **port 1:1** de
 ## Estado actual (checkpoint)
 
 **Backlog activo:** `plan/backlog-engine-cli-tauri.json` (M0→M3 con gates).
-**Último hito completado: M0 (GATE-BASELINE)** — ver sección "M0" abajo.
+**Estado: M0–M3 completados (20/20 historias) — GATE-BASELINE,
+GATE-ENGINE, GATE-CLI y GATE-DESKTOP en verde (2026-10-02).**
 
 | EPIC | Tema | Estado |
 |------|------|--------|
@@ -24,10 +25,10 @@ Este repositorio (`gx-linter-rs`) es el **port 1:1** de
 | 04 | Filesystem + XPZ extractor | Pendiente (GX-006/007) |
 | 05 | Trait Rule + registry + runtime/dispatch | Pendiente (GX-003/004/005) |
 | 06 | Catálogo 30 reglas | Parcial (24 concretas + audit GX-008) |
-| 07 | Reporte PDF | Pendiente (GX-019, P3) |
-| 08 | CLI (clap) | Pendiente (GX-012/013/014) |
-| 09 | GUI → reemplazada por **Tauri 2** | Pendiente (GX-015..018) |
-| 10 | QA/paridad, migración datos, empaquetado | Cubierto por backlog nuevo |
+| 07 | Reporte PDF | ✅ Hecho (GX-019: printpdf, CLI + desktop) |
+| 08 | CLI (clap) | ✅ Hecho (GX-012/013/014) |
+| 09 | GUI → reemplazada por **Tauri 2** | ✅ Hecho (GX-015..018) |
+| 10 | QA/paridad, migración datos, empaquetado | ✅ Hecho (NSIS + CI desktop) |
 
 ---
 
@@ -332,22 +333,88 @@ Validación con los exports reales de `examples/` (4 archivos):
 
 ---
 
-## Handoff a nueva sesión (2026-10-02)
+## M3 — GX-015..GX-020 ✅ (2026-10-02) — GATE-DESKTOP listo
 
-M0–M2 completados (14 historias, gates GATE-BASELINE/GATE-ENGINE/GATE-CLI).
-El detalle de M3 quedó especificado en `plan/backlog-engine-cli-tauri.json`:
+### GX-015 — Shell Tauri 2 + Vue
+- `desktop/` con Vue 3.5 + TypeScript + Vite 6 + Tailwind 4 (Pinia);
+  `desktop/src-tauri/` es workspace propio con path deps a las crates, de
+  modo que `cargo test --workspace` del engine NO depende de Node.
+- `tauri.conf.json` (1280x800, devUrl 5173, frontendDist ../dist, bundle
+  NSIS, capabilities `core:default` + `dialog:allow-open`), iconos generados.
+- Scaffold egui eliminado (`crates/gx_app/src/main.rs` y su `[[bin]]`);
+  README sin referencias a eframe/egui.
+- Smoke test del release: arranca y crea `%APPDATA%\GX\Linter\data\gx_linter.db`.
 
-- `executionState` — hitos cerrados, verificación vigente (73 tests, 0
-  ignored, fmt/clippy/release ✓), adjudicaciones activas y `sessionHandoff`
-  con el snapshot de APIs/contratos (startHere + knowBeforeStarting).
-- Historias GX-015..GX-020 con campo `handoffSpec` — pasos concretos,
-  archivos objetivo, comandos, riesgos y fixtures de desarrollo para cada
-  historia de Tauri 2/Vue, PDF y cierre documental.
+### GX-016 — Contrato de comandos
+- `gx_engine::runtime::{analyze_with_progress, FileProgress}` con progreso
+  por archivo y cancelación (`AtomicBool`); `analyze()` delega sin cambios
+  (paridad golden intacta). `runtime::is_known_rule` para validar ids.
+- `gx_core::summary::text_summary` compartido con el CLI (salida idéntica);
+  `AuditRun::from_analysis` como única procedencia de historial CLI/desktop;
+  `rules_dao::exists`; `audit_dao::list_runs` devuelve `AuditRunSummary`.
+- Comandos: `scan` (spawn_blocking + Channel), `cancel_scan`,
+  `pick_source_files` (valida extensiones en Rust), `list_rules` /
+  `set_rule_enabled`, `get_settings` / `set_settings`, `list_audit_runs` /
+  `get_audit_issues`, `render_text_summary`, `read_object_source`, `save_pdf`.
+- Validación de frontera (schema, paths, set vacío, reglas desconocidas) →
+  `CommandError {code, message}`; nunca panic. 7 tests Rust del desktop:
+  paridad GUI↔engine, progreso + historial atómico, fallo nunca limpio,
+  validación, visor, upgrade.
 
-Cómo retomar: leer `executionState.sessionHandoff` del backlog → iniciar
-GX-015 (shell Tauri 2) → GX-016 (comandos async sobre
-AnalysisRequest/Result) → GX-017 (UI de auditoría) → GX-018 (release) —
-GX-019/GX-020 son P3 y no bloquean GATE-DESKTOP.
+### GX-017 — UI de auditoría
+- Tabs Scan / Reglas / Historial. ScanView (picker nativo + ruta manual,
+  política absoluta o porcentual, progreso por archivo, cancelar),
+  ResultsView (banner de veredicto, métricas, fallos separados de los
+  hallazgos), FindingsTable (filtros severidad/regla/texto, paginación de
+  100 filas, j/k/flechas + Enter, `aria-activedescendant`), SourceViewer
+  (línea real del miembro, navegación anterior/siguiente, Escape),
+  RulesView (toggles con `role=switch` + rerun sin reiniciar),
+  HistoryView (corridas + hallazgos históricos con identidad de objeto).
+- Accesibilidad: roles tab/switch/dialog/status, labels aria, focus visible,
+  contraste AA, estados de carga/vacío. Paginación en vez de virtualización
+  (evita dependencia extra; DOM acotado).
+
+### GX-018 — Release
+- Instalador NSIS: `target/release/bundle/nsis/gx-linter_1.0.0_x64-setup.exe`
+  (3.62 MiB) con assets de Vue embebidos (sin Node en runtime).
+- CI: job `desktop` (Node 20, `npm ci`, `npm run build`, `cargo test`,
+  `npm run tauri build`, artifact NSIS); los jobs del engine/CLI no cambian.
+- Upgrade verificado por test: flags de usuario e historial sobreviven la
+  reapertura de la base (migraciones V1→V3).
+- README: prerequisitos (WebView2/MSVC), comandos dev/build, datos locales,
+  troubleshooting.
+
+### GX-019 — PDF (P3)
+- `gx_report::{render, render_bytes, layout}` con printpdf 0.12 (Helvetica
+  builtin): portada con métricas/veredicto/política, fallos destacados y
+  hallazgos paginados con descripción envuelta; el layout es texto puro
+  testeable y el PDF se genera SIN re-ejecutar el engine.
+- CLI: `--pdf` en `scan` (un fallo del PDF NO altera el exit code) y
+  `gx export-pdf --result-file <json> --out <pdf>`.
+- Desktop: botón «Exportar PDF» en ResultsView → `save_pdf` con diálogo
+  nativo.
+- Tests: todos los hallazgos en el layout, header `%PDF`, acentos y paths
+  largos, 1000 hallazgos paginan; matriz CLI con `--pdf` y `export-pdf`.
+
+### GX-020 — Documentación/CI (P3)
+- `cargo xtask build` / `build-debug` implementados (release + copia a
+  `dist/gx.exe`); `remote.txt` eliminado; `migration-rust.json` marcado como
+  referencia histórica.
+- CI con jobs fmt/clippy/test/cli-matrix/audit/build-release/desktop.
+
+### Adjudicación M3
+- `code_start_line` ahora apunta a la línea del `<![CDATA[` (inicio del
+  texto) y `SourceObject::member_line(text_line)` mapea 1:1 texto→miembro
+  para el visor; no afecta el golden (campo interno, sin cambios en
+  hallazgos).
+
+### Verificación GATE-DESKTOP
+- `cargo fmt --all -- --check` ✅ · `clippy -D warnings` ✅ ·
+  `cargo test --workspace` ✅ (~90 tests, 0 ignored) ·
+  `cargo build --workspace --release` ✅
+- Desktop: `npm run build` ✅ · `cargo test` ✅ (7 tests) ·
+  `npm run tauri build` ✅ (NSIS) · smoke del release ✅
+- `cargo xtask build` ✅ (release + dist/gx.exe)
 
 ---
 

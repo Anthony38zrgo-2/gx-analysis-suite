@@ -10,7 +10,7 @@ Rust reimplementation of the GeneXus Static Analysis Linter
 | M0 | GATE-BASELINE: fixture reproducible + harness de regresiones (GX-001/002) | ✅ Done |
 | M1 | GATE-ENGINE: ciclo de vida, dispatch, determinismo, fidelidad XPZ, dialectos (GX-003..008) | ✅ Done |
 | M2 | GATE-QA + GATE-CLI: catálogo confiable, AnalysisRequest/Result + quality gates, persistencia atómica, CLI productivo (GX-009..014) | ✅ Done |
-| M3 | GATE-DESKTOP: Tauri 2 (GX-015..020) | ⏳ Next |
+| M3 | GATE-DESKTOP: Tauri 2 + Vue 3, comandos async, UI de auditoría, PDF y release NSIS (GX-015..020) | ✅ Done |
 
 See `plan/backlog-engine-cli-tauri.json` for the full backlog and
 `plan/PROGRESS.md` for detailed checkpoints.
@@ -24,8 +24,9 @@ gx-linter-rs/
     gx_rules/     # catálogo de 30 reglas (24 concretas + 6 abstractas)
     gx_engine/    # runtime/dispatch/analyze + contract
     gx_storage/   # SQLite persistence, catálogo e historial (GX-009/011)
-    gx_report/    # PDF generation (P3)
-    gx_app/       # CLI `gx` + GUI scaffold
+    gx_report/    # PDF source-aware (GX-019)
+    gx_app/       # CLI `gx`
+  desktop/        # Tauri 2 + Vue 3 desktop app (workspace propio, GX-015+)
   xtask/          # dev task runner (replaces build.ps1)
   tests/fixtures/ # golden snapshot + adjudications + corpus de regresión
 ```
@@ -74,6 +75,10 @@ cargo run -p gx_app --bin gx -- rules disable GX.2.6
 
 # Historial de auditoría (opt-in; los scans CI no escriben)
 cargo run -p gx_app --bin gx -- scan --file <path> --record-history
+
+# PDF source-aware (GX-019): junto al scan o desde un JSON ya emitido
+cargo run -p gx_app --bin gx -- scan --file <path> --pdf informe.pdf
+cargo run -p gx_app --bin gx -- export-pdf --result-file result.json --out informe.pdf
 ```
 
 **Entradas soportadas:** `.txt`/`.prg`/`.gxd`/`.src`, `.xml` (export
@@ -109,6 +114,62 @@ Sample JSON (recortado):
   ]
 }
 ```
+
+## Desktop (`desktop/`) — GX-015..GX-018
+
+Aplicación **Tauri 2 + Vue 3 + TypeScript + Vite + Tailwind** que reutiliza
+el MISMO engine (`AnalysisRequest`/`AnalysisResult`) que el CLI; el frontend
+no duplica lógica de lint.
+
+### Prerequisitos
+
+- Rust stable con toolchain MSVC (el mismo del workspace).
+- Node 20+ (solo para desarrollar/compilar el frontend).
+- WebView2 Runtime: preinstalado en Windows 10/11 recientes; si falta,
+  instalar el *Evergreen WebView2 Runtime* de Microsoft.
+
+### Comandos
+
+```bash
+cd desktop
+npm install            # primera vez
+npm run tauri dev      # desarrollo (Vite en 5173 + app Tauri)
+npm run tauri build    # instalador NSIS (release)
+npm run build          # solo frontend: typecheck + vite build
+```
+
+El workspace del engine NO depende del toolchain frontend:
+`cargo test --workspace` sigue pasando sin Node.
+
+### Comandos Rust expuestos (GX-016)
+
+| Comando | Descripción |
+|---|---|
+| `scan(request, onProgress)` | Escaneo asíncrono con progreso por archivo (Channel) y cancelación |
+| `cancel_scan` | Solicita cancelar el scan en curso |
+| `pick_source_files` | Diálogo nativo; valida extensiones fuente en Rust |
+| `list_rules` / `set_rule_enabled` | Catálogo y configuración en la base local |
+| `get_settings` / `set_settings` | Umbrales del quality gate |
+| `list_audit_runs` / `get_audit_issues` | Historial con identidad de objeto |
+| `render_text_summary` | Mismo resumen textual que `gx scan --format text` |
+| `read_object_source` | Texto del miembro para el visor (línea real del miembro) |
+| `save_pdf` | Diálogo nativo + PDF desde el resultado (GX-019) |
+
+Errores del backend: `{ code, message }` (nunca panic); un input no
+soportado aparece como fallo destacado, jamás como resultado limpio.
+
+### Datos locales
+
+`%APPDATA%\GX\Linter\data\gx_linter.db` (fallback `./data/gx_linter.db`).
+Las migraciones V1→V3 preservan reglas, settings e historial entre upgrades.
+
+### Troubleshooting
+
+- Ventana en blanco en `tauri dev`: verificar que Vite escucha en el puerto
+  5173 (el `devUrl` de `tauri.conf.json`).
+- Error de WebView2 al iniciar: instalar el runtime Evergreen.
+- El instalador NSIS no está firmado: si el antivirus lo bloquea, agregar la
+  excepción (firma de código pendiente).
 
 ## Parity baseline
 

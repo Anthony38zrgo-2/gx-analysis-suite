@@ -4,6 +4,7 @@
 pub mod filesystem;
 pub mod models;
 pub mod regex_cache;
+pub mod summary;
 pub mod xpz_extractor;
 
 pub use models::{AuditContext, AuditMetrics, Issue, ParsedLine, Severity, SourceLine};

@@ -1,0 +1,29 @@
+[package]
+name = "gx-linter-desktop"
+version = "1.0.0"
+description = "GX Linter desktop shell (Tauri 2 + Vue 3)"
+edition = "2021"
+rust-version = "1.77"
+
+# Workspace propio: aísla el toolchain Tauri/frontend del workspace del
+# engine (GX-015) sin dejar de consumir las crates por path.
+[workspace]
+
+[lib]
+name = "gx_linter_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+rusqlite = { version = "0.31", features = ["bundled"] }
+gx_core = { path = "../../crates/gx_core" }
+gx_engine = { path = "../../crates/gx_engine" }
+gx_storage = { path = "../../crates/gx_storage" }
+gx_report = { path = "../../crates/gx_report" }

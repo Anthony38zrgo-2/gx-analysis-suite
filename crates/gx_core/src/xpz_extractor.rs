@@ -490,6 +490,10 @@ fn extract_from_xml_text(xml_text: &str, container: &str, member: &str) -> Extra
 }
 
 /// Secciones de código de un objeto: `(kind, texto, línea en el miembro)`.
+///
+/// `code_start_line` apunta a la línea del miembro donde COMIENZA el texto
+/// extraído (la línea del `<!\[CDATA\[`), de modo que
+/// `member_line = code_start_line + text_line - 1` (GX-006/GX-017).
 fn code_sections(
     xml_text: &str,
     block_offset: usize,
@@ -508,8 +512,8 @@ fn code_sections(
         if cdata.trim().is_empty() {
             continue;
         }
-        let abs_start = block_offset + caps.get(0).map(|m| m.start()).unwrap_or(0);
-        let line = xml_text[..abs_start.min(xml_text.len())]
+        let cdata_start = block_offset + caps.get(2).map(|m| m.start()).unwrap_or(0);
+        let line = xml_text[..cdata_start.min(xml_text.len())]
             .matches('\n')
             .count() as u32
             + 1;
@@ -524,7 +528,6 @@ fn legacy_events_objects(xml_text: &str, container: &str, member: &str) -> Vec<S
     let root = root_info(xml_text);
     let mut objects = Vec::new();
     for caps in EVENTS_CDATA_RE.captures_iter(xml_text) {
-        let whole_start = caps.get(0).map(|m| m.start()).unwrap_or(0);
         let cdata = match caps.get(1) {
             Some(m) => m.as_str(),
             None => continue,
@@ -532,7 +535,11 @@ fn legacy_events_objects(xml_text: &str, container: &str, member: &str) -> Vec<S
         if cdata.trim().is_empty() {
             continue;
         }
-        let code_start_line = xml_text[..whole_start].matches('\n').count() as u32 + 1;
+        let cdata_start = caps
+            .get(1)
+            .map(|m| m.start())
+            .unwrap_or_else(|| caps.get(0).map(|m| m.start()).unwrap_or(0));
+        let code_start_line = xml_text[..cdata_start].matches('\n').count() as u32 + 1;
         let id = if root.name.is_empty() {
             member_stem(member)
         } else {
@@ -855,6 +862,38 @@ EndSub
         assert_eq!(objects.len(), 2);
         assert_eq!(objects[0].object.member, "KB/KB_1.xml");
         assert_eq!(objects[0].object.id, "JFCQ350");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// GX-006/GX-017: `code_start_line` apunta a la línea del `<!\[CDATA\[`
+    /// y `member_line` mapea 1:1 el texto extraído al miembro.
+    #[test]
+    fn cdata_start_line_maps_to_member_lines() {
+        let xml = "<?xml version=\"1.0\"?>\n\
+                   <Procedure name=\"ProcMalo\" package=\"Pkg\">\n\
+                   <Events>\n\
+                   <![CDATA[\n\
+                   &MiVar = 1\n\
+                   sub 'Inicializar'\n\
+                   ]]>\n\
+                   </Events>\n\
+                   </Procedure>\n";
+        let p = tmp("gx_member_line.xml");
+        std::fs::write(&p, xml).unwrap();
+        let objects = extract_source_objects(&p).unwrap();
+        assert_eq!(objects.len(), 1);
+        let obj = &objects[0];
+        assert_eq!(obj.code_start_line, 4, "el CDATA comienza en la línea 4");
+        assert_eq!(
+            obj.member_line(2),
+            5,
+            "&MiVar = 1 está en la línea 5 del miembro"
+        );
+        assert_eq!(
+            obj.member_line(3),
+            6,
+            "sub 'Inicializar' está en la línea 6 del miembro"
+        );
         let _ = std::fs::remove_file(&p);
     }
 

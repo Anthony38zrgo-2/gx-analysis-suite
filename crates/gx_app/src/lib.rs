@@ -1,1 +1,1 @@
-//! Final binaries (CLI + GUI). Implemented in EPIC-08 / EPIC-09.
+//! Final binaries (CLI `gx`). El desktop vive en `desktop/` (Tauri 2, GX-015).

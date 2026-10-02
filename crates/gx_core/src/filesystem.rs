@@ -7,7 +7,19 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 
 /// Accepted GeneXus source extensions (GX-007: incluye .xml).
-const SOURCE_EXTENSIONS: &[&str] = &[".txt", ".xml", ".xpz", ".prg", ".gxd", ".src"];
+pub const SOURCE_EXTENSIONS: &[&str] = &[".txt", ".xml", ".xpz", ".prg", ".gxd", ".src"];
+
+/// Whether `path` has a supported GeneXus source extension (case-insensitive).
+///
+/// Usado por el desktop para validar la selección del diálogo nativo (GX-016)
+/// con la MISMA lista que el discovery del engine.
+pub fn is_source_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e.to_lowercase()))
+        .map(|ext| SOURCE_EXTENSIONS.contains(&ext.as_str()))
+        .unwrap_or(false)
+}
 
 /// Static helper for filesystem validation and source discovery.
 pub struct Filesystem;

@@ -9,3 +9,4 @@ chrono = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 directories = "5.0"
+printpdf = { version = "0.12", default-features = false }

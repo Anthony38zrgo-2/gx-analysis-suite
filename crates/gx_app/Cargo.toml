@@ -7,10 +7,6 @@ edition.workspace = true
 name = "gx"
 path = "src/bin/gx.rs"
 
-[[bin]]
-name = "gx_linter_gui"
-path = "src/main.rs"
-
 [dependencies]
 gx_core = { path = "../gx_core" }
 gx_engine = { path = "../gx_engine" }

@@ -3,26 +3,29 @@
   "project": "gx-linter-rs",
   "title": "Execution backlog: reliable GeneXus engine, production CLI, then Tauri 2 desktop UI",
   "createdOn": "2026-10-01",
-  "status": "en-ejecucion (M0-M2 completados 2026-10-02; M3 pendiente — ver executionState)",
+  "status": "completado (M0-M3, 20/20 historias; gates GATE-BASELINE/ENGINE/CLI/DESKTOP en verde 2026-10-02)",
   "supersedesForExecution": "plan/migration-rust.json",
   "executionState": {
     "updatedAt": "2026-10-02",
     "milestonesDone": [
       { "id": "M0", "gate": "GATE-BASELINE", "closedOn": "2026-10-02", "stories": ["GX-001", "GX-002"] },
       { "id": "M1", "gate": "GATE-ENGINE", "closedOn": "2026-10-02", "stories": ["GX-003", "GX-004", "GX-005", "GX-006", "GX-007", "GX-008"] },
-      { "id": "M2", "gate": "GATE-CLI", "closedOn": "2026-10-02", "stories": ["GX-009", "GX-010", "GX-011", "GX-012", "GX-013", "GX-014"] }
+      { "id": "M2", "gate": "GATE-CLI", "closedOn": "2026-10-02", "stories": ["GX-009", "GX-010", "GX-011", "GX-012", "GX-013", "GX-014"] },
+      { "id": "M3", "gate": "GATE-DESKTOP", "closedOn": "2026-10-02", "stories": ["GX-015", "GX-016", "GX-017", "GX-018", "GX-019", "GX-020"] }
     ],
-    "milestonesPending": [{ "id": "M3", "gate": "GATE-DESKTOP", "stories": ["GX-015", "GX-016", "GX-017", "GX-018"], "optional": ["GX-019", "GX-020"] }],
+    "milestonesPending": [],
     "verificationAtHandoff": {
       "cargoFmtCheck": "pass",
       "cargoClippy": "pass (-D warnings, --all-targets)",
-      "cargoTestWorkspace": "pass (85 tests, 0 ignored; incluye exports reales RAR/ZIP)",
+      "cargoTestWorkspace": "pass (93 tests, 0 ignored)",
       "cargoBuildRelease": "pass",
-      "cliMatrix": "17/17 tests sobre el binario real (incluye 3 casos de exports reales)"
+      "cliMatrix": "19/19 tests sobre el binario real",
+      "desktop": "npm run build pass; cargo test 7/7; npm run tauri build pass (NSIS 3.62 MiB); smoke del release pass (crea la base local)"
     },
     "storiesDone": [
       "GX-001", "GX-002", "GX-003", "GX-004", "GX-005", "GX-006", "GX-007", "GX-008",
-      "GX-009", "GX-010", "GX-011", "GX-012", "GX-013", "GX-014"
+      "GX-009", "GX-010", "GX-011", "GX-012", "GX-013", "GX-014",
+      "GX-015", "GX-016", "GX-017", "GX-018", "GX-019", "GX-020"
     ],
     "postM2RealExports": {
       "doneOn": "2026-10-02",
@@ -33,24 +36,27 @@
     },
     "adjudications": [
       "GX-004: el golden ganó 5 hallazgos (2×GX.2.7.1@55/56, 2×endfor sin tabla GX.1.3@69/70, DEFINED BY faltante GX.1.3@61) por ramas muertas del despacho Python; baseline efectivo = 22 hallazgos (14E/8W) en tests/fixtures/golden_adjudications.json; golden_issues.json (Python) intacto.",
-      "GX-008: bloques /* */ multilínea se enmascaran (Python linteaba código deshabilitado); when/or/and/in/like/between en línea propia ya no cierran el where (falsos negativos de Python). Detalles en tests/fixtures/BASELINE.md."
+      "GX-008: bloques /* */ multilínea se enmascaran (Python linteaba código deshabilitado); when/or/and/in/like/between en línea propia ya no cierran el where (falsos negativos de Python). Detalles en tests/fixtures/BASELINE.md.",
+      "GX-019: el PDF se genera desde AnalysisResult sin re-ejecutar el engine; un fallo del PDF nunca altera el veredicto del lint (CLI: aviso en stderr; desktop: error estructurado del comando).",
+      "M3: code_start_line apunta a la línea del <![CDATA[ y SourceObject::member_line mapea 1:1 texto→miembro para el visor; campo interno, sin cambio en hallazgos/golden."
     ],
     "sessionHandoff": {
-      "startHere": "M3 (GATE-DESKTOP): empezar por GX-015 con la especificación extendida en las historias de E05/E06 (campo handoffSpec).",
+      "startHere": "Backlog completo (20/20). Para cambios futuros: respetar la paridad golden (22/14/8), la matriz CLI (19 tests) y los 7 tests del desktop; el desktop usa el MISMO contrato AnalysisRequest/AnalysisResult que el CLI.",
       "stateSnapshot": {
-        "engine": "gx_engine::runtime::{analyze(request) -> AnalysisResult, scan_file, build_rules, run_file, evaluate_files_parallel} — sin dependencia de clap/Tauri; emisión determinista (objeto→línea→registro de regla); reset por objeto; finalize por objeto.",
-        "contract": "gx_core::models::{AnalysisRequest, AnalysisResult, QgPolicy::{Absolute,Percentage}, QgVerdict::{Pass,Reject,Error}, ScanFailure, Issue{object:Option<ObjectRef>}, ObjectRef{id,object_type,package,member,container_path}, SourceObject{text,code_start_line}, AuditContext}",
-        "storage": "gx_storage::db::{init_db(), init_db_at(path), init_memory_db()} siembra y valida el catálogo (seed_from_registry, 24 concretas/15 habilitadas); audit_dao::persist_run atómico; V003 agrega identidad de objeto y policy/verdict/failures_json.",
-        "cli": "gx scan [path|--file] --format text|json --max-errors --max-warnings --error-pct --enable --disable --rules-csv --record-history --db · gx rules list|enable|disable · exit codes: 0 pass, 1 reject, 2 invocación, 3 fallo de scan.",
-        "tests": "tests/fixtures: golden (sources/ejemplo_codigo.txt + golden_issues.json + golden_adjudications.json + BASELINE.md), cases/ (~50 por regla), dialects/ (8), sources/sample_package.xpz + unusable_package.xpz + proc_malo.xml + clean_object.txt; regenerar XPZ: cargo run -p gx_core --example make_xpz_fixture.",
-        "rules": "24 concretas + 6 abstractas en gx_rules (define_rule! con route = tokens opcional); 7 sin estado con ruta Tokens; resto AllLines; orden determinista de textos garantizado (1.1/1.4.2/2.7.4 ordenan sets)."
+        "engine": "gx_engine::runtime::{analyze, analyze_with_progress, scan_file, build_rules, run_file, evaluate_files_parallel, is_known_rule} — sin dependencia de clap/Tauri; emisión determinista; reset/finalize por objeto; progreso por archivo + cancelación opcional (GX-016).",
+        "contract": "gx_core::models::{AnalysisRequest, AnalysisResult, QgPolicy::{Absolute,Percentage}, QgVerdict::{Pass,Reject,Error}, ScanFailure, Issue{object:Option<ObjectRef>}, ObjectRef, SourceObject{text,code_start_line,member_line()}, AuditContext} + gx_core::summary::text_summary (CLI↔desktop).",
+        "storage": "gx_storage::db::{init_db(), init_db_at(path), init_memory_db()}; audit_dao::{persist_run, list_runs->AuditRunSummary, get_issues_for_run, AuditRun::from_analysis}; rules_dao::{get_all, get_enabled_ids, set_enabled, exists, is_rule_enabled}; settings_dao.",
+        "cli": "gx scan [path|--file] --format text|json --pdf <pdf> --max-errors --max-warnings --error-pct --enable --disable --rules-csv --record-history --db · gx rules list|enable|disable · gx export-pdf --result-file <json> --out <pdf> · exit codes: 0 pass, 1 reject, 2 invocación, 3 fallo de scan.",
+        "desktop": "desktop/ (Vue 3 + Pinia + Tailwind 4) y desktop/src-tauri (workspace propio, path deps). Comandos: scan/cancel_scan/pick_source_files/list_rules/set_rule_enabled/get_settings/set_settings/list_audit_runs/get_audit_issues/render_text_summary/read_object_source/save_pdf. Build: npm run tauri dev|build; datos en %APPDATA%\\GX\\Linter\\data\\gx_linter.db.",
+        "report": "gx_report::{layout, render_bytes, render} con printpdf 0.12 (Helvetica builtin); CLI --pdf/export-pdf y comando desktop save_pdf.",
+        "tests": "tests/fixtures (golden + adjudicaciones + BASELINE + cases + dialects + real_exports); matriz CLI 19 tests; desktop 7 tests; gx_report 4 tests."
       },
       "knowBeforeStarting": [
-        "GATE-CLI ya pasó: NO romper la paridad golden (22/14/8) ni la matriz CLI; cualquier cambio de comportamiento se adjudica con fixture + razón (regla de ejecución 5).",
-        "El CLI nunca escribe en disco por defecto; --record-history es opt-in (CI limpio).",
-        "El desktop DEBE usar el MISMO AnalysisRequest/AnalysisResult (no duplicar lint logic en TypeScript).",
-        "El scaffold egui de gx_app/src/main.rs debe eliminarse en GX-015 (es la única GUI hermana del CLI bin).",
-        "Los tests de gx_app usan env!(\"CARGO_BIN_EXE_gx\"); el patrón existe en crates/gx_app/tests/cli_matrix.rs."
+        "GATE-CLI/GATE-DESKTOP ya pasaron: NO romper la paridad golden (22/14/8), la matriz CLI ni los tests del desktop; cualquier cambio de comportamiento se adjudica con fixture + razón (regla de ejecución 5).",
+        "El CLI nunca escribe en disco por defecto; --record-history es opt-in. El desktop guarda historial por defecto (checkbox en ScanView).",
+        "El desktop DEBE seguir usando el MISMO AnalysisRequest/AnalysisResult (no duplicar lint logic en TypeScript).",
+        "El workspace del engine no depende de Node; el desktop vive en su propio workspace Cargo.",
+        "Para regenerar el PDF de prueba: gx scan --file tests/fixtures/sources/ejemplo_codigo.txt --pdf out.pdf o gx export-pdf --result-file result.json --out out.pdf."
       ]
     }
   },

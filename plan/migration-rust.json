@@ -1,6 +1,7 @@
 {
   "meta": {
     "project": "gx-linter-rs",
+    "supersededBy": "plan/backlog-engine-cli-tauri.json — M0-M3 completados; este documento queda como referencia histórica de la migración Python→Rust (la GUI eframe/egui fue reemplazada por Tauri 2).",
     "sourceRepo": "genexus-linter-python",
     "targetLanguage": "Rust 1.77+ (edition 2021)",
     "database": "SQLite via rusqlite 0.31 bundled (sin servidor externo)",

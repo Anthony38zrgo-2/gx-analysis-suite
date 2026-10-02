@@ -63,9 +63,18 @@ pub struct SourceObject {
     pub object: ObjectRef,
     /// Texto fuente crudo del objeto (CDATA de Events o el archivo entero).
     pub text: String,
-    /// Línea (1-based) del miembro XML donde comienza el código extraído;
-    /// 1 para archivos de texto plano.
+    /// Línea (1-based) del miembro XML donde comienza el texto extraído
+    /// (la línea del `<!\[CDATA\[`); 1 para archivos de texto plano.
     pub code_start_line: u32,
+}
+
+impl SourceObject {
+    /// Línea del miembro XML correspondiente a `text_line` (1-based del
+    /// texto extraído). El texto y el miembro comparten numeración a partir
+    /// de [`SourceObject::code_start_line`] (GX-006/GX-017).
+    pub fn member_line(&self, text_line: u32) -> u32 {
+        self.code_start_line + text_line.saturating_sub(1)
+    }
 }
 
 /// Un hallazgo (issue) del análisis.

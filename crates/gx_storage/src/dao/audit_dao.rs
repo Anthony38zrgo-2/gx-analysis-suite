@@ -1,6 +1,7 @@
 //! Audit run / issue history DAO.
 
 use rusqlite::Connection;
+use serde::Serialize;
 
 use gx_core::models::Issue;
 
@@ -29,6 +30,67 @@ pub struct AuditRun {
     pub verdict: Option<String>,
     /// GX-011: fallos de scan serializados (JSON).
     pub failures_json: Option<String>,
+}
+
+impl AuditRun {
+    /// Construye la fila de historial desde el contrato compartido
+    /// CLI/desktop (GX-016): una sola procedencia para ambos entrypoints.
+    pub fn from_analysis(
+        request: &gx_core::models::AnalysisRequest,
+        result: &gx_core::models::AnalysisResult,
+        triggered_by: &str,
+    ) -> Self {
+        use gx_core::models::{QgPolicy, QgVerdict};
+
+        let file_path = request
+            .inputs
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let file_name = match request.inputs.as_slice() {
+            [single] => single
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            inputs => format!("{} entrada(s)", inputs.len()),
+        };
+        let file_size_bytes = match request.inputs.as_slice() {
+            [single] => std::fs::metadata(single).ok().map(|m| m.len() as i64),
+            _ => None,
+        };
+
+        AuditRun {
+            file_path,
+            file_name,
+            file_hash: None,
+            file_size_bytes,
+            triggered_by: triggered_by.to_string(),
+            total_findings: result.metrics.total_findings as i64,
+            errors: result.metrics.errors as i64,
+            warnings: result.metrics.warnings as i64,
+            info: result.metrics.info as i64,
+            qg_passed: result.verdict == QgVerdict::Pass,
+            qg_threshold_pct: match &request.policy {
+                QgPolicy::Percentage { max_error_pct } => *max_error_pct,
+                _ => 0.0,
+            },
+            duration_ms: None,
+            pdf_path: None,
+            engine_version: env!("CARGO_PKG_VERSION").to_string(),
+            policy: Some(request.policy.name().to_string()),
+            verdict: Some(match result.verdict {
+                QgVerdict::Pass => "pass".to_string(),
+                QgVerdict::Reject => "reject".to_string(),
+                QgVerdict::Error => "error".to_string(),
+            }),
+            failures_json: if result.failures.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&result.failures).ok()
+            },
+        }
+    }
 }
 
 /// Insert a run row and return its autoincrement id.
@@ -119,13 +181,44 @@ pub fn persist_run(conn: &mut Connection, run: &AuditRun, issues: &[Issue]) -> R
     Ok(run_id)
 }
 
+/// Summary row for the audit history UI (GX-016/GX-017).
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditRunSummary {
+    pub id: i64,
+    pub file_path: String,
+    pub file_name: String,
+    pub started_at: String,
+    pub total_findings: i64,
+    pub errors: i64,
+    pub warnings: i64,
+    pub info: i64,
+    pub verdict: Option<String>,
+    pub policy: Option<String>,
+    pub qg_passed: bool,
+}
+
 /// Most recent runs, newest first.
-pub fn list_runs(conn: &Connection, limit: i64) -> Result<Vec<(i64, String, i64)>> {
+pub fn list_runs(conn: &Connection, limit: i64) -> Result<Vec<AuditRunSummary>> {
     let mut stmt = conn.prepare(
-        "SELECT id, file_name, total_findings FROM audit_runs \
-         ORDER BY started_at DESC LIMIT ?1",
+        "SELECT id, file_path, file_name, started_at, total_findings, errors, warnings, info, \
+                verdict, policy, qg_passed \
+         FROM audit_runs ORDER BY id DESC LIMIT ?1",
     )?;
-    let rows = stmt.query_map([limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    let rows = stmt.query_map([limit], |r| {
+        Ok(AuditRunSummary {
+            id: r.get(0)?,
+            file_path: r.get(1)?,
+            file_name: r.get(2)?,
+            started_at: r.get(3)?,
+            total_findings: r.get(4)?,
+            errors: r.get(5)?,
+            warnings: r.get(6)?,
+            info: r.get(7)?,
+            verdict: r.get(8)?,
+            policy: r.get(9)?,
+            qg_passed: r.get::<_, Option<bool>>(10)?.unwrap_or(false),
+        })
+    })?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);

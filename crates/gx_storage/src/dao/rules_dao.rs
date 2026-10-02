@@ -48,6 +48,15 @@ pub fn is_rule_enabled(conn: &Connection, rule_id: &str) -> Result<bool> {
     }
 }
 
+/// Whether a rule id exists in the catalog.
+pub fn exists(conn: &Connection, rule_id: &str) -> Result<bool> {
+    let count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM rules WHERE id = ?1", [rule_id], |r| {
+            r.get(0)
+        })?;
+    Ok(count > 0)
+}
+
 /// Persist an enabled flag for a rule.
 pub fn set_enabled(conn: &Connection, rule_id: &str, enabled: bool) -> Result<()> {
     conn.execute(

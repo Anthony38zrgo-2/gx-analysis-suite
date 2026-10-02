@@ -3,6 +3,10 @@
 **/target
 Cargo.lock
 
+# Node / frontend
+node_modules/
+desktop/src-tauri/gen/
+
 # IDE
 .idea/
 .vscode/

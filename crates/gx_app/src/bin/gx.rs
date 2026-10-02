@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use gx_core::models::{AnalysisRequest, QgPolicy, QgVerdict};
+use gx_core::models::{AnalysisRequest, AnalysisResult, QgPolicy, QgVerdict};
 use gx_storage::dao::rules_dao;
 
 const EXIT_PASS: i32 = 0;
@@ -70,11 +70,23 @@ enum Commands {
         /// Base de datos local alternativa (para pruebas/uso avanzado).
         #[arg(long, value_name = "DB")]
         db: Option<String>,
+        /// Genera además un PDF del resultado (su fallo NO altera el exit code).
+        #[arg(long, value_name = "PDF")]
+        pdf: Option<String>,
     },
     /// Gestión del catálogo de reglas.
     Rules {
         #[command(subcommand)]
         action: RulesAction,
+    },
+    /// Genera un PDF desde un AnalysisResult serializado (GX-019).
+    ExportPdf {
+        /// JSON con el AnalysisResult (salida de `gx scan --format json`).
+        #[arg(long, value_name = "JSON")]
+        result_file: String,
+        /// Ruta del PDF de salida.
+        #[arg(long, value_name = "PDF")]
+        out: String,
     },
 }
 
@@ -140,6 +152,7 @@ fn run(cli: Cli) -> Result<i32> {
             rules_csv,
             record_history,
             db,
+            pdf,
         } => cmd_scan(
             path,
             file,
@@ -152,8 +165,10 @@ fn run(cli: Cli) -> Result<i32> {
             rules_csv.as_deref(),
             record_history,
             db.as_deref(),
+            pdf.as_deref(),
         ),
         Commands::Rules { action } => cmd_rules(action),
+        Commands::ExportPdf { result_file, out } => cmd_export_pdf(&result_file, &out),
     }
 }
 
@@ -207,6 +222,7 @@ fn cmd_scan(
     rules_csv: Option<&str>,
     record_history: bool,
     db: Option<&str>,
+    pdf: Option<&str>,
 ) -> Result<i32> {
     // Invocación inválida: sin path (código 2).
     let Some(path_str) = path.or(file) else {
@@ -239,41 +255,16 @@ fn cmd_scan(
 
     // Historial opt-in (GX-011/GX-013: CI no escribe).
     if record_history {
-        let run = gx_storage::dao::audit_dao::AuditRun {
-            file_path: path.to_string_lossy().to_string(),
-            file_name: path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            file_hash: None,
-            file_size_bytes: std::fs::metadata(&path).ok().map(|m| m.len() as i64),
-            triggered_by: "cli".to_string(),
-            total_findings: result.metrics.total_findings as i64,
-            errors: result.metrics.errors as i64,
-            warnings: result.metrics.warnings as i64,
-            info: result.metrics.info as i64,
-            qg_passed: result.verdict == QgVerdict::Pass,
-            qg_threshold_pct: match &request.policy {
-                QgPolicy::Percentage { max_error_pct } => *max_error_pct,
-                _ => 0.0,
-            },
-            duration_ms: None,
-            pdf_path: None,
-            engine_version: env!("CARGO_PKG_VERSION").to_string(),
-            policy: Some(request.policy.name().to_string()),
-            verdict: Some(
-                serde_json::to_string(&result.verdict)?
-                    .trim_matches('"')
-                    .to_string(),
-            ),
-            failures_json: if result.failures.is_empty() {
-                None
-            } else {
-                Some(serde_json::to_string(&result.failures)?)
-            },
-        };
+        let run = gx_storage::dao::audit_dao::AuditRun::from_analysis(&request, &result, "cli");
         let mut conn = open_db(db)?;
         gx_storage::dao::audit_dao::persist_run(&mut conn, &run, &result.findings)?;
+    }
+
+    // GX-019: PDF opcional; un fallo del PDF NUNCA altera el veredicto.
+    if let Some(pdf_path) = pdf {
+        if let Err(e) = gx_report::render(&result, std::path::Path::new(pdf_path)) {
+            eprintln!("[gx] aviso: no se pudo generar el PDF '{pdf_path}': {e:#}");
+        }
     }
 
     // Fallos de scan SIEMPRE a stderr, en ambos formatos (GX-013).
@@ -287,7 +278,7 @@ fn cmd_scan(
             serde_json::to_writer_pretty(std::io::stdout().lock(), &result)?;
             println!();
         }
-        _ => print_text_summary(&result)?,
+        _ => print!("{}", gx_core::summary::text_summary(&result)),
     }
 
     match result.verdict {
@@ -295,49 +286,6 @@ fn cmd_scan(
         QgVerdict::Reject => Ok(EXIT_REJECT),
         QgVerdict::Error => Ok(EXIT_SCAN_FAILURE),
     }
-}
-
-fn print_text_summary(result: &gx_core::models::AnalysisResult) -> Result<()> {
-    println!(
-        "[gx] política: {}",
-        match &result.policy {
-            QgPolicy::Absolute {
-                max_errors,
-                max_warnings,
-            } => format!("absolute (max_errors={max_errors}, max_warnings={max_warnings})"),
-            QgPolicy::Percentage { max_error_pct } =>
-                format!("percentage (max_error_pct={max_error_pct})"),
-        }
-    );
-    println!(
-        "[gx] archivos escaneados: {} | hallazgos: {} ({} ERROR / {} WARNING / {} INFO)",
-        result.scanned_files,
-        result.metrics.total_findings,
-        result.metrics.errors,
-        result.metrics.warnings,
-        result.metrics.info
-    );
-    for issue in &result.findings {
-        let object = match &issue.object {
-            Some(o) => format!(" [{} ({}) {}]", o.id, o.object_type, o.member),
-            None => String::new(),
-        };
-        println!(
-            "{:<7} {:<10} línea {:<4}{} {}",
-            issue.severity.as_str(),
-            issue.rule_id,
-            issue.line_number,
-            object,
-            issue.description
-        );
-    }
-    let verdict = match result.verdict {
-        QgVerdict::Pass => "PASS",
-        QgVerdict::Reject => "REJECT",
-        QgVerdict::Error => "ERROR (fallos de scan)",
-    };
-    println!("[gx] quality gate: {verdict} ({})", result.policy.name());
-    Ok(())
 }
 
 fn cmd_rules(action: RulesAction) -> Result<i32> {
@@ -391,4 +339,19 @@ fn cmd_rules(action: RulesAction) -> Result<i32> {
             Ok(EXIT_PASS)
         }
     }
+}
+
+/// GX-019: genera un PDF desde un `AnalysisResult` serializado, sin
+/// re-ejecutar el engine.
+fn cmd_export_pdf(result_file: &str, out: &str) -> Result<i32> {
+    let json = std::fs::read_to_string(result_file)
+        .map_err(|e| anyhow::anyhow!("no se pudo leer '{result_file}': {e}"))?;
+    let result: AnalysisResult = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("'{result_file}' no es un AnalysisResult válido: {e}"))?;
+    gx_report::render(&result, std::path::Path::new(out))?;
+    println!(
+        "[gx] PDF generado: {out} ({} hallazgos)",
+        result.metrics.total_findings
+    );
+    Ok(EXIT_PASS)
 }

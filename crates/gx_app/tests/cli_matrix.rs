@@ -365,3 +365,95 @@ fn record_history_writes_when_requested() {
     assert_eq!(verdict, "reject");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// GX-019: `--pdf` genera un PDF válido junto al resultado y un fallo del
+/// PDF NUNCA altera el exit code del lint.
+#[test]
+fn scan_pdf_flag_generates_pdf_without_changing_exit_code() {
+    let dir = std::env::temp_dir().join("gx_cli_pdf");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fixture = fixtures("sources/ejemplo_codigo.txt");
+    let pdf = dir.join("informe.pdf");
+
+    let out = gx(&[
+        "scan",
+        "--file",
+        fixture.to_str().unwrap(),
+        "--pdf",
+        pdf.to_str().unwrap(),
+    ]);
+    assert_eq!(out.code, 1, "reject se mantiene con PDF");
+    let bytes = std::fs::read(&pdf).expect("el PDF debe existir");
+    assert!(bytes.starts_with(b"%PDF"));
+
+    // Fallo del PDF: un archivo normal usado como "directorio" padre.
+    let blocker = dir.join("blocker.txt");
+    std::fs::write(&blocker, "no soy un directorio").unwrap();
+    let bad_pdf = blocker.join("sub").join("x.pdf");
+    let clean = fixtures("sources/clean_object.txt");
+    let out = gx(&[
+        "scan",
+        "--file",
+        clean.to_str().unwrap(),
+        "--pdf",
+        bad_pdf.to_str().unwrap(),
+    ]);
+    assert_eq!(out.code, 0, "pass se mantiene aunque falle el PDF");
+    assert!(
+        out.stderr.contains("no se pudo generar el PDF"),
+        "debe avisar en stderr: {}",
+        out.stderr
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// GX-019: `gx export-pdf` genera el PDF desde el JSON sin re-ejecutar el
+/// engine; el total de hallazgos coincide con el JSON.
+#[test]
+fn export_pdf_from_scan_json() {
+    let dir = std::env::temp_dir().join("gx_cli_export_pdf");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fixture = fixtures("sources/ejemplo_codigo.txt");
+    let json_path = dir.join("result.json");
+    let pdf_path = dir.join("export.pdf");
+
+    let out = gx(&[
+        "scan",
+        "--file",
+        fixture.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(out.code, 1);
+    let json: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(json["metrics"]["total_findings"], 22);
+    std::fs::write(&json_path, &out.stdout).unwrap();
+
+    let out = gx(&[
+        "export-pdf",
+        "--result-file",
+        json_path.to_str().unwrap(),
+        "--out",
+        pdf_path.to_str().unwrap(),
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(out.stdout.contains("22 hallazgos"));
+    let bytes = std::fs::read(&pdf_path).expect("el PDF debe existir");
+    assert!(bytes.starts_with(b"%PDF"));
+    assert!(bytes.len() > 1_000);
+
+    // JSON inválido: fallo explícito (exit 3), nunca un PDF vacío.
+    let bad = dir.join("bad.json");
+    std::fs::write(&bad, "{ no json }").unwrap();
+    let out = gx(&[
+        "export-pdf",
+        "--result-file",
+        bad.to_str().unwrap(),
+        "--out",
+        pdf_path.to_str().unwrap(),
+    ]);
+    assert_eq!(out.code, 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
