@@ -6,19 +6,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-/// Accepted plain-text GeneXus export extensions.
-const SOURCE_EXTENSIONS: &[&str] = &[".txt", ".prg", ".gxd", ".src", ".xpz"];
-
-/// Extensions excluded when falling back to "any file".
-const EXCLUDED_EXTENSIONS: &[&str] = &[
-    ".py",
-    ".pyc",
-    ".csv",
-    ".pdf",
-    ".gitkeep",
-    ".md",
-    ".txt_backup",
-];
+/// Accepted GeneXus source extensions (GX-007: incluye .xml).
+const SOURCE_EXTENSIONS: &[&str] = &[".txt", ".xml", ".xpz", ".prg", ".gxd", ".src"];
 
 /// Static helper for filesystem validation and source discovery.
 pub struct Filesystem;
@@ -57,8 +46,9 @@ impl Filesystem {
     /// Recursively find GeneXus source files under `path`.
     ///
     /// If `path` is a file, returns a single-element list. Otherwise it
-    /// walks the tree, preferring known extensions; if none are found it
-    /// falls back to any non-hidden file that is not in the excluded set.
+    /// walks the tree returning only files with known source extensions.
+    /// GX-007: NO hay fallback "cualquier archivo" — los archivos sin
+    /// extensión fuente NO se lintean; el caller decide el error.
     pub fn find_source_files(path: &Path) -> Vec<PathBuf> {
         if path.is_file() {
             return vec![path.to_path_buf()];
@@ -91,37 +81,6 @@ impl Filesystem {
             }
         }
 
-        if !found.is_empty() {
-            found.sort();
-            return found;
-        }
-
-        for entry in walkdir::WalkDir::new(path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let p = entry.path();
-            if !p.is_file() {
-                continue;
-            }
-            let name = match p.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n,
-                None => continue,
-            };
-            if name.starts_with('.') {
-                continue;
-            }
-            let ext = p
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| format!(".{e}"))
-                .unwrap_or_default()
-                .to_lowercase();
-            if !EXCLUDED_EXTENSIONS.contains(&ext.as_str()) {
-                found.push(p.to_path_buf());
-            }
-        }
-
         found.sort();
         found
     }
@@ -144,5 +103,43 @@ mod tests {
         let res = Filesystem::find_source_files(&tmp);
         assert_eq!(res.len(), 1);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn find_source_files_includes_xml() {
+        let dir = std::env::temp_dir().join("gx_fs_dir_xml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("obj.txt"), "code\n").unwrap();
+        std::fs::write(
+            dir.join("obj.xml"),
+            "<Root><Events><![CDATA[=]]></Events></Root>",
+        )
+        .unwrap();
+        std::fs::write(dir.join("data.csv"), "a,b\n").unwrap();
+        std::fs::write(dir.join("doc.pdf"), "pdf").unwrap();
+
+        let res = Filesystem::find_source_files(&dir);
+        let names: Vec<String> = res
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["obj.txt".to_string(), "obj.xml".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GX-007: sin fallback "cualquier archivo" — extensiones ajenas no se
+    /// lintean; el resultado es una lista vacía (el caller reporta el error).
+    #[test]
+    fn find_source_files_rejects_unrelated_extensions() {
+        let dir = std::env::temp_dir().join("gx_fs_dir_other");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("data.csv"), "a,b\n").unwrap();
+        std::fs::write(dir.join("doc.md"), "doc").unwrap();
+
+        let res = Filesystem::find_source_files(&dir);
+        assert!(res.is_empty(), "no debe lintear fallback: {res:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

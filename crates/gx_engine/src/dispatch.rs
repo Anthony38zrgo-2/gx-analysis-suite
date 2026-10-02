@@ -1,9 +1,27 @@
-//! Trigger tokens and their `ParsedLine` flag mappings.
+//! Dispatch plan (GX-004).
+//!
+//! Replaces the old token-only `HashMap` dispatch with an explicit plan:
+//!
+//! - `AllLines` rules run on every non-empty line. Required by stateful
+//!   rules whose logic must observe continuation lines, bodies or comments
+//!   (where/defined by/endfor for GX.1.3, otherwise for GX.1.3.3, sub
+//!   bodies for GX.2.6, where continuations for GX.2.1/2.2/2.4/2.5, loop
+//!   bodies for GX.2.7.1, comments for GX.1.6.x/1.7.x, parm continuations
+//!   for GX.1.4.3, and the DEFAULT rules GX.1.2/1.3.1/1.3.2/2.3).
+//! - `Tokens` rules run only when a line carries one of their trigger
+//!   tokens. Only stateless rules use this route, and their `evaluate`
+//!   guards on exactly those flags, so the route is a pure optimization.
+//!
+//! The old fallback ("no candidates ⇒ run every rule") is GONE: with
+//! AllLines routes there are no holes to compensate for, and running a
+//! token rule on a line it guards against produces identical results.
+//!
+//! Candidate order is deterministic: ascending rule-registry order.
 
 use gx_core::models::ParsedLine;
+use gx_rules::base::{DispatchRoute, Rule};
 
-/// Default trigger: rules with no triggers run on every non-empty line.
-pub const DEFAULT_TRIGGER: &str = "*";
+pub use gx_rules::base::DispatchRoute as Route;
 
 /// Map a trigger token to the `ParsedLine` boolean flag it requires.
 pub type TriggerFn = fn(&ParsedLine) -> bool;
@@ -44,7 +62,7 @@ pub fn has_do(l: &ParsedLine) -> bool {
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-/// Trigger token → flag predicate, mirroring `runtime.TRIGGER_MAP`.
+/// Trigger token → flag predicate, mirroring the Python `runtime.TRIGGER_MAP`.
 pub static TRIGGER_MAP: LazyLock<HashMap<&'static str, TriggerFn>> = LazyLock::new(|| {
     let mut m: HashMap<&'static str, TriggerFn> = HashMap::new();
     m.insert("&", has_ampersand);
@@ -57,3 +75,65 @@ pub static TRIGGER_MAP: LazyLock<HashMap<&'static str, TriggerFn>> = LazyLock::n
     m.insert("do", has_do);
     m
 });
+
+/// Precomputed per-scan line-selection plan.
+pub struct DispatchPlan {
+    rule_count: usize,
+    /// Ascending indices of rules that run on every line.
+    all_lines: Vec<usize>,
+    /// (ascending index, flag predicates) for token-routed rules.
+    token_rules: Vec<(usize, Vec<TriggerFn>)>,
+}
+
+impl DispatchPlan {
+    /// Reference plan: every rule evaluates every line.
+    pub fn all_rules_every_line(rule_count: usize) -> Self {
+        DispatchPlan {
+            rule_count,
+            all_lines: (0..rule_count).collect(),
+            token_rules: Vec::new(),
+        }
+    }
+}
+
+/// Build the plan from the rule set and their declared routes.
+///
+/// A token route whose trigger token has no flag mapping is an engine
+/// configuration error: it is rejected instead of silently never firing.
+pub fn plan_dispatch(rules: &[Box<dyn Rule>]) -> Result<DispatchPlan, String> {
+    let mut plan = DispatchPlan {
+        rule_count: rules.len(),
+        all_lines: Vec::new(),
+        token_rules: Vec::new(),
+    };
+    for (idx, rule) in rules.iter().enumerate() {
+        match rule.dispatch_route() {
+            DispatchRoute::AllLines => plan.all_lines.push(idx),
+            DispatchRoute::Tokens(tokens) => {
+                let mut fns = Vec::with_capacity(tokens.len());
+                for token in tokens {
+                    let flag = TRIGGER_MAP
+                        .get(*token)
+                        .ok_or_else(|| format!("trigger token sin mapeo de flag: {token}"))?;
+                    fns.push(*flag);
+                }
+                plan.token_rules.push((idx, fns));
+            }
+        }
+    }
+    Ok(plan)
+}
+
+/// Rules that must evaluate `parsed`, in ascending registry order.
+pub fn collect_candidate_rules(parsed: &ParsedLine, plan: &DispatchPlan) -> Vec<usize> {
+    let mut selected = vec![false; plan.rule_count];
+    for &i in &plan.all_lines {
+        selected[i] = true;
+    }
+    for &(i, ref flags) in &plan.token_rules {
+        if flags.iter().any(|flag| flag(parsed)) {
+            selected[i] = true;
+        }
+    }
+    (0..plan.rule_count).filter(|&i| selected[i]).collect()
+}

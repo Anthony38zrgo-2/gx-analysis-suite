@@ -1,0 +1,28 @@
+rules:
+// CODIGO INICIATIVA: INIT-88
+// DESCRIPCION: matriz de dialectos - bloques anidados
+// RESPONSIBLE: qa
+// VERSION: 1.0.0
+
+events:
+    // Prepara el recorrido anidado
+    for each Customer
+        where CustomerId = &CustomerIdIn
+        defined by CustomerIdx
+        // Recorre las órdenes del cliente
+        for each Order
+            where OrderStatus = &OrderStatusIn
+            defined by OrderIdx
+            &LineTotal = 1
+            msg(&LineTotal)
+        endfor // Order
+    endfor // Customer
+
+    // Inicializa el cierre
+    sub 'Finalizar'
+        // Inicializa la variable de salida
+        &Total = nullvalue(0)
+        &Count = 1
+        &Total = &Total + &Count
+        msg(&Total)
+    endsub

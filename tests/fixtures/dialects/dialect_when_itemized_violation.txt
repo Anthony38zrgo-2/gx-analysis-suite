@@ -1,0 +1,15 @@
+rules:
+// CODIGO INICIATIVA: INIT-55
+// DESCRIPCION: when itemizado dentro de where
+// RESPONSIBLE: qa
+// VERSION: 1.0.0
+
+events:
+    // Prepara el estado del filtro
+    &OnlyActive = nullvalue(0)
+    for each Customer
+        where CustomerStatus = &OnlyActive
+        when &OnlyActive = 1
+        when &OnlyActive = 2
+        defined by CustomerIdx
+    endfor // Customer

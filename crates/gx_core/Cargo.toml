@@ -10,6 +10,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 encoding_rs = "0.8"
 zip = "2.2"
+unrar = "0.5"
 quick-xml = "0.31"
 walkdir = "2.4"
 rayon = "1.8"

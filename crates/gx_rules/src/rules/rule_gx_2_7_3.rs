@@ -16,7 +16,7 @@ define_rule! {
     severity = Severity::Error,
     description = "Para el caso de la variable condición se recomienda evitar la reutilización.",
     triggers = ["=", "&"],
-    abstract = false,
+    abstract = false, route = tokens,
     struct RuleGx2_7_3 {
         assigned_condition_vars: HashSet<String>,
     },

@@ -16,7 +16,7 @@ define_rule! {
     severity = Severity::Warning,
     description = "No se deben reutilizar variables en distintas partes del código.",
     triggers = ["=", "&"],
-    abstract = false,
+    abstract = false, route = tokens,
     struct RuleGx1_4_1 {
         assigned_vars: HashMap<String, u32>,
     },

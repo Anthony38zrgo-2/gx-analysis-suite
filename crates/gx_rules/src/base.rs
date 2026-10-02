@@ -55,7 +55,22 @@ pub fn make_issue(
         file_path: file
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("Unknown")),
+        object: None,
     }
+}
+
+/// How the engine selects the lines a rule must evaluate (GX-004).
+///
+/// `AllLines` is required by stateful rules whose logic needs to observe
+/// continuation lines, bodies or comments (where/defined by/endfor,
+/// otherwise, sub bodies, parm continuations, DO-comment tracking, …).
+/// `Tokens` is valid ONLY for rules whose `evaluate` guards on exactly the
+/// trigger flags — in that case the route is a pure optimization and its
+/// results are identical to `AllLines` (covered by an equivalence test).
+#[derive(Debug, Clone, Copy)]
+pub enum DispatchRoute {
+    AllLines,
+    Tokens(&'static [&'static str]),
 }
 
 /// The core rule contract.
@@ -65,8 +80,15 @@ pub trait Rule: Send + Sync {
     fn severity(&self) -> Severity;
     fn description(&self) -> &'static str;
     /// Trigger tokens; empty ⇒ DEFAULT_TRIGGER (`*`).
+    ///
+    /// This is METADATA (catalog/seed parity with the Python rule files);
+    /// the actual line selection is [`Rule::dispatch_route`].
     fn triggers(&self) -> &'static [&'static str] {
         &[]
+    }
+    /// Line-selection route used by the engine's dispatch plan.
+    fn dispatch_route(&self) -> DispatchRoute {
+        DispatchRoute::AllLines
     }
     fn is_abstract(&self) -> bool {
         false
@@ -90,7 +112,9 @@ macro_rules! define_rule {
         severity = $sev:expr,
         description = $desc:literal,
         triggers = [$($trig:literal),* $(,)?],
-        abstract = $abs:expr,
+        abstract = $abs:expr
+        $(, route = $route:ident)?
+        ,
         struct $name:ident { $($field:ident : $fty:ty),* $(,)? },
         reset = $reset:expr,
         evaluate = $eval:expr
@@ -119,6 +143,16 @@ macro_rules! define_rule {
             fn severity(&self) -> $crate::base::Severity { $sev }
             fn description(&self) -> &'static str { $desc }
             fn triggers(&self) -> &'static [&'static str] { &[$($trig),*] }
+
+            fn dispatch_route(&self) -> $crate::base::DispatchRoute {
+                $(
+                    if stringify!($route) == "tokens" {
+                        return $crate::base::DispatchRoute::Tokens(self.triggers());
+                    }
+                )?
+                $crate::base::DispatchRoute::AllLines
+            }
+
             fn is_abstract(&self) -> bool { $abs }
 
             fn reset(&mut self, file: &::std::path::Path) {

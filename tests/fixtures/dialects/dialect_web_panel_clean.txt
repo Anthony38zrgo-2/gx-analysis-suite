@@ -1,0 +1,18 @@
+rules:
+// CODIGO INICIATIVA: INIT-44
+// DESCRIPCION: panel web con mensajes y subrutinas
+// RESPONSIBLE: qa
+// VERSION: 1.0.0
+
+events:
+    // Prepara el mensaje del panel web
+    &From = 'Inicio'
+    // Envia el mensaje al usuario
+    msg(&From)
+    // Llama a la limpieza del estado
+    do 'Limpiar'
+    sub 'Limpiar'
+        // Limpia el estado del panel
+        &From = nullvalue(0)
+        msg(&From)
+    endsub

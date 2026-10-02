@@ -11,7 +11,7 @@ define_rule! {
     severity = Severity::Warning,
     description = "No es recomendable definir condiciones booleanas con más de tres operandos.",
     triggers = ["if", "case"],
-    abstract = false,
+    abstract = false, route = tokens,
     struct RuleGx1_5 {},
     reset = |me: &mut RuleGx1_5, _file: &Path| {  },
     evaluate = |me: &mut RuleGx1_5, line: &ParsedLine, ctx: &AuditContext| {

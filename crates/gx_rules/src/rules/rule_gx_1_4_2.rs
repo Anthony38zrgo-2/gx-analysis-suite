@@ -35,7 +35,7 @@ define_rule! {
     severity = Severity::Warning,
     description = "En sentencias de decisión (If, Case) se debe usar variables, no debe usarse atributos.",
     triggers = ["if", "case"],
-    abstract = false,
+    abstract = false, route = tokens,
     struct RuleGx1_4_2 {},
     reset = |me: &mut RuleGx1_4_2, _file: &Path| {  },
     evaluate = |me: &mut RuleGx1_4_2, line: &ParsedLine, ctx: &AuditContext| {
@@ -73,7 +73,9 @@ define_rule! {
         if detected.is_empty() {
             return vec![];
         }
-        let sorted: Vec<&String> = detected.iter().collect();
+        // Orden determinista del texto del diagnóstico (GX-005).
+        let mut sorted: Vec<&String> = detected.iter().collect();
+        sorted.sort();
         vec![make_issue(
             me.id(),
             me.severity(),

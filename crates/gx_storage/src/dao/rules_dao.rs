@@ -3,11 +3,12 @@
 use std::collections::HashMap;
 
 use rusqlite::Connection;
+use serde::Serialize;
 
 use crate::Result;
 
 /// A row from the `rules` table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RuleRecord {
     pub id: String,
     pub raw_id: String,
@@ -32,18 +33,19 @@ pub fn load_rule_config(conn: &Connection) -> Result<HashMap<String, bool>> {
     Ok(map)
 }
 
-/// Whether a rule is enabled. Missing rule → enabled by default.
-pub fn is_rule_enabled(conn: &Connection, rule_id: &str) -> bool {
-    let res: Result<bool> = (|| {
-        let mut stmt = conn.prepare("SELECT enabled FROM rules WHERE id = ?1")?;
-        let mut rows = stmt.query_map([rule_id], |r| r.get::<_, bool>(0))?;
-        match rows.next() {
-            Some(Ok(v)) => Ok(v),
-            Some(Err(e)) => Err(e.into()),
-            None => Ok(true),
-        }
-    })();
-    res.unwrap_or(true)
+/// Whether a rule is enabled (GX-009, fail-closed).
+///
+/// Una fila faltante = DESHABILITADA (nunca se escanea una regla sin
+/// registro en el catálogo); los errores de SQL se PROPAGAN en lugar de
+/// interpretarse como "todas habilitadas".
+pub fn is_rule_enabled(conn: &Connection, rule_id: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT enabled FROM rules WHERE id = ?1")?;
+    let mut rows = stmt.query_map([rule_id], |r| r.get::<_, bool>(0))?;
+    match rows.next() {
+        Some(Ok(v)) => Ok(v),
+        Some(Err(e)) => Err(e.into()),
+        None => Ok(false),
+    }
 }
 
 /// Persist an enabled flag for a rule.

@@ -1,0 +1,3 @@
+sub 'X'
+    &y = nullvalue(0)
+endsub

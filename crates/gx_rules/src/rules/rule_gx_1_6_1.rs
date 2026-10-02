@@ -59,8 +59,11 @@ define_rule! {
             me.last_active_line_was_comment = false;
             return vec![];
         }
+        // El Python original consulta el flag ANTES de limpiarlo
+        // (rule_gx_1_6_1.py:111-112); limpiar después de emitir.
+        let had_comment = me.last_active_line_was_comment;
         me.last_active_line_was_comment = false;
-        if !me.last_active_line_was_comment {
+        if !had_comment {
             return vec![make_issue(
                 me.id(),
                 me.severity(),

@@ -15,7 +15,7 @@ define_rule! {
     severity = Severity::Error,
     description = "NO se deben definir variables ni vectores que no se utilicen dentro del programa.",
     triggers = ["&"],
-    abstract = false,
+    abstract = false, route = tokens,
     struct RuleGx2_7_4 {
         var_declaration_lines: HashMap<String, SourceLine>,
         read_vars: HashSet<String>,
@@ -58,7 +58,9 @@ define_rule! {
         vec![]
      },
     finalize = |me: &mut RuleGx2_7_4, _ctx: &AuditContext| {
-        let dead: Vec<String> = me.written_vars.difference(&me.read_vars).cloned().collect();
+        let mut dead: Vec<String> = me.written_vars.difference(&me.read_vars).cloned().collect();
+        // Orden determinista de emisión (GX-005).
+        dead.sort();
         let mut issues: Vec<Issue> = Vec::new();
         for variable in dead {
             if SYSTEM_EXCLUSIONS.contains(&variable.as_str()) {

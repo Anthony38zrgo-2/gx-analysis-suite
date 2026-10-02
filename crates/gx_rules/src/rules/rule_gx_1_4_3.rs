@@ -60,11 +60,16 @@ impl RuleGx1_4_3 {
             None => return vec![],
         };
         let buffer = self.parm_buffer_parts.join(" ");
-        let m = match PARM_CONTENT_PATTERN.find(&buffer) {
+        // El Python original usa match.group(1): solo el contenido interno
+        // del paréntesis (rule_gx_1_4_3.py:90), no el match completo.
+        let m = match PARM_CONTENT_PATTERN.captures(&buffer) {
             Some(m) => m,
             None => return vec![],
         };
-        let inner = m.as_str().trim();
+        let inner = match m.get(1) {
+            Some(g) => g.as_str().trim(),
+            None => return vec![],
+        };
         if inner.is_empty() {
             return vec![];
         }

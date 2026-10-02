@@ -1,0 +1,5 @@
+rules:
+// CODIGO INICIATIVA: INIT-123
+// DESCRIPCION: prueba
+// RESPONSIBLE: qa
+// VERSION: 1.0.0

@@ -1,0 +1,151 @@
+{
+  "schemaVersion": "1.0.0",
+  "description": "Snapshot adjudicado de exports GeneXus reales (GX-007/GX-008). Fija conteos por regla, identidad de objetos y spot-checks verificados contra la fuente original.",
+  "reviewedOn": "2026-10-02",
+  "manualReview": "Cada spot-check fue verificado línea a línea contra el CDATA original del export: GX.2.6 sobre 'Sub' sin nullvalue, GX.2.2 OR dentro del Where, GX.2.5 valores duros (2445 / 1), GX.1.3.2 If sin Else, GX.1.4.3 Parm sin direcciones. Todos son verdaderos positivos según la semántica de cada regla.",
+  "formatNotes": "Los exports usan ExportFile/GXObject: identidad desde Info/Name y Info/Folder, tipo desde el primer elemento hijo, código desde Events + Rules + Subroutines (CDATA); Layout/Source y Documentation/Source se excluyen.",
+  "exports": [
+    {
+      "file": "HJFCP716.xpz",
+      "container": "rar",
+      "sha256": "E6DDA28D4EE0E4F14C937F11201C5CD24520D770B5A700885DD21B43B9B8C2AC",
+      "objectsWithCode": [
+        {
+          "id": "JFCP716",
+          "objectType": "WebPanel",
+          "package": "",
+          "member": "HJFCP716/HJFCP716_1.xml"
+        }
+      ],
+      "recognizedObjects": 5,
+      "metrics": { "total": 102, "errors": 40, "warnings": 62 },
+      "perRule": {
+        "GX.1.3": 40,
+        "GX.1.3.2": 22,
+        "GX.2.2": 1,
+        "GX.2.5": 15,
+        "GX.2.6": 20,
+        "GX.2.7.1": 2,
+        "GX.2.7.2": 2
+      }
+    },
+    {
+      "file": "JBMP018.xpz",
+      "container": "zip",
+      "sha256": "CABAC3EACA2C0B2469BB334678EEC7E65A84A2B03712C4687496FCCA225917D1",
+      "objectsWithCode": [
+        {
+          "id": "JBMP018",
+          "objectType": "WebPanel",
+          "package": "NUCLEO_Tablas",
+          "member": "JBMP018_1.xml"
+        },
+        {
+          "id": "JBMP018",
+          "objectType": "Procedure",
+          "package": "NUCLEO_Tablas",
+          "member": "JBMP018_1.xml"
+        }
+      ],
+      "recognizedObjects": 8,
+      "metrics": { "total": 47, "errors": 9, "warnings": 38 },
+      "perRule": {
+        "GX.1.3": 16,
+        "GX.1.3.2": 7,
+        "GX.1.4.3": 15,
+        "GX.2.5": 2,
+        "GX.2.6": 7
+      }
+    },
+    {
+      "file": "HJFCQ350.xpz",
+      "container": "zip",
+      "sha256": "94AEB86DFDB98A7ADA8925F1F6C779AD9354A201A4BDA5D322458B6A6C8B5046",
+      "objectsWithCode": [],
+      "recognizedObjects": 3,
+      "metrics": { "total": 0, "errors": 0, "warnings": 0 },
+      "perRule": {}
+    },
+    {
+      "file": "jngz293.xpz",
+      "container": "zip",
+      "sha256": "ED190F03DA4444B648CA34F6879C31BB8B4F38A4C0FBA10D2765B33E46C894E4",
+      "objectsWithCode": [],
+      "recognizedObjects": 2,
+      "metrics": { "total": 0, "errors": 0, "warnings": 0 },
+      "perRule": {}
+    }
+  ],
+  "spotChecks": [
+    {
+      "file": "HJFCP716.xpz",
+      "rule": "GX.2.6",
+      "line": 7,
+      "severity": "ERROR",
+      "objectId": "JFCP716",
+      "objectType": "WebPanel",
+      "lineContent": "Sub 'Obtener_nombre_cuenta'",
+      "note": "Sub sin nullvalue en sus primeras líneas"
+    },
+    {
+      "file": "HJFCP716.xpz",
+      "rule": "GX.2.2",
+      "line": 25,
+      "severity": "ERROR",
+      "objectId": "JFCP716",
+      "objectType": "WebPanel",
+      "lineContent": "Where Y06TipOpe   = &PTope or  Y06TipOpe = &Ptope1",
+      "note": "OR dentro de una cláusula Where"
+    },
+    {
+      "file": "HJFCP716.xpz",
+      "rule": "GX.1.3.2",
+      "line": 27,
+      "severity": "WARNING",
+      "objectId": "JFCP716",
+      "objectType": "WebPanel",
+      "lineContent": "If Y06SubTip = 28",
+      "note": "If sin Else"
+    },
+    {
+      "file": "HJFCP716.xpz",
+      "rule": "GX.2.5",
+      "line": 82,
+      "severity": "ERROR",
+      "objectId": "JFCP716",
+      "objectType": "WebPanel",
+      "lineContent": "Where Tp1cod1  = 2445",
+      "note": "Valor en código duro dentro del Where"
+    },
+    {
+      "file": "JBMP018.xpz",
+      "rule": "GX.2.6",
+      "line": 3,
+      "severity": "ERROR",
+      "objectId": "JBMP018",
+      "objectType": "WebPanel",
+      "lineContent": "Sub 'Valita Juridica'",
+      "note": "Sub sin nullvalue"
+    },
+    {
+      "file": "JBMP018.xpz",
+      "rule": "GX.2.5",
+      "line": 6,
+      "severity": "ERROR",
+      "objectId": "JBMP018",
+      "objectType": "WebPanel",
+      "lineContent": "Where Pgcod=1",
+      "note": "Valor en código duro (espacio final recortado en la comparación)"
+    },
+    {
+      "file": "JBMP018.xpz",
+      "rule": "GX.1.4.3",
+      "line": 1,
+      "severity": "WARNING",
+      "objectId": "JBMP018",
+      "objectType": "Procedure",
+      "lineContent": "Parm(&PPgcod, &PModulo, &pMoneda, &pPapel, &pCTNRO, &pUbsuc, &PItoper, &PItsubo, &pTotope, &Categoria, &Plazo, &Monto, &AgteCod, &Comentario,&Modo);",
+      "note": "Sección Rules del Procedure: parámetros sin dirección (uno por parámetro)"
+    }
+  ]
+}

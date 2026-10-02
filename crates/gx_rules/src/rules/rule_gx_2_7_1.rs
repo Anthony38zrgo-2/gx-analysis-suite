@@ -31,14 +31,16 @@ define_rule! {
         let has_do = lower.contains("do");
         if has_for {
             let is_for_each = starts_with_kw(lower, "for each");
-            let is_for_loop = !is_for_each && (lower == "for" || starts_with_kw(lower, "for "));
+            // Nota: starts_with_kw ya añade el espacio; el Python original
+            // usa lower == "for" || lower.startswith("for ").
+            let is_for_loop = !is_for_each && (lower == "for" || starts_with_kw(lower, "for"));
             if is_for_loop {
                 me.loop_depth += 1;
                 if me.loop_depth == 1 {
                     me.loop_origin_line = line.number;
                 }
             }
-        } else if has_do && (lower == "do while" || starts_with_kw(lower, "do while ")) {
+        } else if has_do && (lower == "do while" || starts_with_kw(lower, "do while")) {
             me.loop_depth += 1;
             if me.loop_depth == 1 {
                 me.loop_origin_line = line.number;

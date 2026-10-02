@@ -14,7 +14,7 @@ define_rule! {
     severity = Severity::Error,
     description = "Evitar Variables sueltas i, j y k en los contadores.",
     triggers = ["=", "&"],
-    abstract = false,
+    abstract = false, route = tokens,
     struct RuleGx2_7_2 {},
     reset = |me: &mut RuleGx2_7_2, _file: &Path| {  },
     evaluate = |me: &mut RuleGx2_7_2, line: &ParsedLine, ctx: &AuditContext| {

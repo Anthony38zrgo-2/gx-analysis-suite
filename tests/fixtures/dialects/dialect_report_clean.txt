@@ -1,0 +1,15 @@
+rules:
+// CODIGO INICIATIVA: INIT-22
+// DESCRIPCION: reporte con bloque print
+// RESPONSIBLE: qa
+// VERSION: 1.0.0
+
+events:
+    // Recorre los clientes del reporte
+    for each Customer
+        where CustomerId = &CustomerIn
+        defined by CustomerIdx
+        &Detail = 1
+        print PBDetalle
+    endfor // Customer
+    msg(&Detail)

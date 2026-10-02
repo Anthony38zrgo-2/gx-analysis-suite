@@ -1,0 +1,71 @@
+rules:
+// HISTORIA DE CAMBIOS:
+// CODIGO INICIATIVA: INIT-123
+// DESCRIPCION: Modificacion para test de reglas
+// RESPONSIBLE: Juan Perez
+// VERSION: 1.0.0
+
+parm(&ClientId, out:&ClientName); // Warning: &ClientId no tiene direccion In/Out
+
+events:
+// Test comments
+do 'Inicializar' // Warning: DO sin comentario previo
+
+sub 'Inicializar'
+    &myvar = 5 // Warning: Variable debe empezar con Mayuscula
+    &temp = 1
+    // Lnea 1
+    // Lnea 2
+    // Lnea 3
+    // Lnea 4
+    // Lnea 5
+    // Lnea 6
+    // Lnea 7
+    // Lnea 8
+    // Lnea 9
+    // Lnea 10
+    // Lnea 11
+    // Lnea 12
+    // Lnea 13
+    // Lnea 14
+    // Lnea 15
+    // Lnea 16
+    &temp = 10 // Warning: Reutilizacin de variable en diferente contexto (>15 lneas)
+endsub
+
+sub 'Procesar'
+// Subrutina sin comentario descriptivo inmediato en la declaracion (Warning 1.6.2)
+    &ok = true
+    if CustomerId = 1 // Warning: Usar variables, no atributos directos
+        &ClientName = "Test"
+    endif // Warning: IF sin ELSE
+
+    do case
+        case &temp = 10
+            &ClientName = "VIP"
+    endcase // Warning: CASE sin OTHERWISE
+
+    if &temp > 1 and &temp < 20 and &myvar = 5 and &ok = true
+        // Warning: Condicion booleana muy compleja
+    endif
+
+    &ok = false // Error: Reutilizacin de variable de condicion
+
+    // Loop
+    for &i = 1 to 10 // Error: variable suelta i
+        &i = &i + 1 // Error: variable suelta i en contador
+    endfor
+endsub
+
+// For Each testing
+for each Customer
+where CustomerStatus = "Active" when &OnlyActive = 1 // Error: WHEN en WHERE
+where CustomerType = "VIP" // Error: Valor en duro en WHERE
+where upper(CustomerName) = &ClientName // Error: Funcion en WHERE
+where CustomerId = 1 or CustomerId = 2 // Error: OR en WHERE
+    for each Order
+        for each OrderDetail
+            &temp = &temp + 1 // Error: For each anidado nivel 3
+        endfor
+    endfor
+endfor // Warning: endfor sin nombre de tabla

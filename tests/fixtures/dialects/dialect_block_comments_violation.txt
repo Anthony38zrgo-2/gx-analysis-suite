@@ -1,0 +1,10 @@
+rules:
+// CODIGO INICIATIVA: INIT-66
+// DESCRIPCION: comentario de bloque y violación real posterior
+// RESPONSIBLE: qa
+// VERSION: 1.0.0
+
+events:
+/* nota de mantenimiento: revisar el recorrido pendiente */
+    &i = &i + 1
+    msg(&i)

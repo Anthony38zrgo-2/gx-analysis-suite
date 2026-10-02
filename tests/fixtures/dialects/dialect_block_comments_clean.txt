@@ -1,0 +1,14 @@
+rules:
+// CODIGO INICIATIVA: INIT-66
+// DESCRIPCION: comentario de bloque multilínea con código deshabilitado
+// RESPONSIBLE: qa
+// VERSION: 1.0.0
+
+events:
+/* Código deshabilitado temporalmente mientras se aprueba el nuevo flujo:
+for each Customer2
+&i = &i + 1
+endfor
+*/
+    &Ready = nullvalue(0)
+    msg(&Ready)

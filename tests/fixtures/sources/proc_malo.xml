@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<Procedure name="ProcMalo" package="PkgDemo">
+<Events>
+<![CDATA[
+&MiVar = 1
+sub 'Inicializar'
+    // Inicializa sin nullvalue
+    &MiVar = &MiVar + 1
+endsub
+&i = &i + 1
+]]>
+</Events>
+</Procedure>

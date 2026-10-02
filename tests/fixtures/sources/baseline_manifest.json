@@ -1,0 +1,110 @@
+{
+  "schemaVersion": "1.0.0",
+  "purpose": "Machine-checked provenance for the parity baseline used by GX-001/GATE-BASELINE.",
+  "source": {
+    "name": "ejemplo_codigo.txt",
+    "sha256": "9BF7A5F3DA1090B5BB70E93298DD3F8058F579E21908D3F1BD5606F59A4D49F3",
+    "bytes": 1920,
+    "lines": 71,
+    "encoding": "ASCII (subset of UTF-8, no BOM, LF endings)",
+    "origin": {
+      "repository": "genexus-linter-python",
+      "repositoryPath": "ejemplo_codigo.txt",
+      "capturedOn": "2026-10-01",
+      "note": "Project-owned GeneXus rules-export sample, redistributable inside this repository."
+    }
+  },
+  "golden": {
+    "issuesFile": "golden_issues.json",
+    "issuesSha256": "53EA086FF7985B46F1E3FEFFB5A51D58E2070D2B2D54E6BB79B5D380D5948E37",
+    "issueCount": 17,
+    "metrics": {
+      "total_findings": 17,
+      "errors": 12,
+      "warnings": 5,
+      "info": 0
+    }
+  },
+  "ruleManifest": {
+    "rulesFile": "rule_manifest.json",
+    "rulesSha256": "72133EF3761B012E46A45E1E5B4D5D25291173E6939C092E47CB54658E62D3E8",
+    "totalRules": 30,
+    "concreteRules": 24,
+    "abstractRules": 6
+  },
+  "adjudications": {
+    "adjudicationsFile": "golden_adjudications.json",
+    "adjudicationsSha256": "44F4A6D2DC63DD92932A460A092BF592413DB505A78AD210D050501CAD171AAE",
+    "story": "GX-004",
+    "adjudicatedCount": 5,
+    "note": "golden_issues.json (output Python) permanece intacto; el baseline efectivo es Python + adjudicaciones."
+  },
+  "baseline": {
+    "engine": "genexus-linter-python",
+    "engineEntry": "gx_linter/app/engine/runtime.py::evaluate_file",
+    "pythonVersion": "3.14.5 (repo .venv)",
+    "enabledRules": [
+      "GX.1.3",
+      "GX.1.3.2",
+      "GX.1.3.3",
+      "GX.1.4.3",
+      "GX.1.5",
+      "GX.1.7.2",
+      "GX.2.1",
+      "GX.2.2",
+      "GX.2.3",
+      "GX.2.4",
+      "GX.2.5",
+      "GX.2.6",
+      "GX.2.7.1",
+      "GX.2.7.2",
+      "GX.2.7.3"
+    ],
+    "enabledCount": 15,
+    "comparisonFields": [
+      "rule_id",
+      "severity",
+      "line_number",
+      "description",
+      "line_content"
+    ],
+    "comparisonKey": "Both sides canonically sorted by (line_number, rule_id); compared as multisets.",
+    "excludedFields": [
+      "file_path (placeholder 'Unknown' until GX-003 lands)",
+      "timing and rule-evaluation counters",
+      "generated PDF paths"
+    ]
+  },
+  "defectsResolved": [
+    {
+      "id": "GX-003",
+      "resolvedOn": "2026-10-02",
+      "summary": "run_file llama Rule::reset(path) antes de evaluar; estado sin fugas y file_path real en cada hallazgo."
+    },
+    {
+      "id": "GX-004",
+      "resolvedOn": "2026-10-02",
+      "summary": "Dispatch por plan: AllLines para reglas con estado, Tokens sólo para reglas sin estado; fallback eliminado; equivalencia contra referencia all-rules-per-line cubierta por test."
+    },
+    {
+      "id": "GX-008",
+      "partial": true,
+      "resolvedOn": "2026-10-02",
+      "summary": "GX.1.6.1 consulta el flag de comentario antes de limpiarlo (paridad con rule_gx_1_6_1.py:111); el audit completo de las 24 reglas sigue en GX-008."
+    }
+  ],
+  "portingBugsFixedDuringM0": [
+    {
+      "rule": "GX.2.5",
+      "summary": "Panic get(2) sobre regex consolidado de 1 grupo; corregido a get(1) (Python usaba group(2) de un regex local de 2 grupos)."
+    },
+    {
+      "rule": "GX.2.7.1",
+      "summary": "Doble espacio por starts_with_kw(lower, \"do while \")/\"for \"; corregido a \"do while\"/\"for\"."
+    },
+    {
+      "rule": "GX.1.4.3",
+      "summary": "find().as_str() (match completo) donde Python usa group(1) (contenido interno); corregido con captures().get(1)."
+    }
+  ]
+}

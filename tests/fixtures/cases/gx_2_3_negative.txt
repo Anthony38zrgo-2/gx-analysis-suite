@@ -1,0 +1,4 @@
+for each Customer
+    for each Order
+    endfor
+endfor

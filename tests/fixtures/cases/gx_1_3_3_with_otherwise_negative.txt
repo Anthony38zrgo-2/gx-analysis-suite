@@ -1,0 +1,6 @@
+do case
+    case &a = 1
+        &x = 1
+    otherwise
+        &x = 2
+endcase

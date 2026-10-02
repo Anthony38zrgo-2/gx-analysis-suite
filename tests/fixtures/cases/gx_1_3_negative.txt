@@ -1,0 +1,4 @@
+for each Customer
+where Att1 = &v
+defined by idx1
+endfor // Customer

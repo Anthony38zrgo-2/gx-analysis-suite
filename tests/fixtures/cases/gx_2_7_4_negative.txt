@@ -1,0 +1,3 @@
+&UnusedData = 1
+&x = &UnusedData
+msg(&x)

@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use regex::Regex;
+use rusqlite::params;
 use rusqlite::Connection;
 
 use crate::{Result, StorageError};
@@ -49,7 +50,7 @@ static TRIGGERS: LazyLock<HashMap<&'static str, &'static [&'static str]>> = Lazy
 static ABSTRACT_RAW_IDS: &[&str] = &["1", "1.4", "1.6", "1.7", "2.0", "2.7"];
 
 /// Enabled flags reproducing `config/rules.json` (15 enabled).
-static DEFAULT_ENABLED: LazyLock<HashMap<&'static str, bool>> = LazyLock::new(|| {
+pub static DEFAULT_ENABLED: LazyLock<HashMap<&'static str, bool>> = LazyLock::new(|| {
     use std::collections::HashMap;
     let mut m: HashMap<&'static str, bool> = HashMap::new();
     for id in [
@@ -68,6 +69,16 @@ static DEFAULT_ENABLED: LazyLock<HashMap<&'static str, bool>> = LazyLock::new(||
 
 static RULE_NUMBER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*(\d+(?:\.\d+)*)\s").unwrap());
+
+/// Ids of the concrete rules enabled by default, matching the Python
+/// engine's `config/rules.json` (the parity baseline's 15-rule set).
+pub fn default_enabled_ids() -> std::collections::HashSet<String> {
+    DEFAULT_ENABLED
+        .iter()
+        .filter(|(_, &enabled)| enabled)
+        .map(|(&id, _)| id.to_string())
+        .collect()
+}
 
 fn category_for(raw_id: &str) -> &'static str {
     if raw_id.starts_with("2.") {
@@ -216,4 +227,69 @@ pub fn seed_if_empty(conn: &Connection, csv_path: &Path) -> Result<usize> {
         return Ok(0);
     }
     import_reglas_csv(conn, csv_path)
+}
+
+/// GX-009: inicializa el catálogo desde el REGISTRY COMPILADO.
+///
+/// Inserta las 30 reglas (24 concretas + 6 abstractas) con metadatos del
+/// código mismo — no hay forma de divergencia catálogo↔registry. Idempotente
+/// (`INSERT OR IGNORE`): una segunda corrida NO modifica flags de usuario.
+pub fn seed_from_registry(conn: &Connection) -> Result<usize> {
+    let mut inserted = 0usize;
+    for rule in gx_rules::all_rules() {
+        let id = rule.id();
+        let raw_id = id.trim_start_matches("GX.").to_string();
+        let triggers_json = serde_json::to_string(rule.triggers())
+            .map_err(|e| StorageError::Seed(e.to_string()))?;
+        let enabled = DEFAULT_ENABLED.get(id).copied().unwrap_or(false);
+        conn.execute(
+            "INSERT OR IGNORE INTO rules(id, raw_id, name, description, severity, \
+             category_id, enabled, is_abstract, triggers) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                id,
+                raw_id,
+                rule.name(),
+                rule.description(),
+                rule.severity().as_str(),
+                category_for(id.trim_start_matches("GX.")),
+                enabled,
+                rule.is_abstract(),
+                triggers_json,
+            ],
+        )?;
+        inserted += conn.changes() as usize;
+    }
+    Ok(inserted)
+}
+
+/// GX-009: valida que el catálogo contenga todas las reglas concretas del
+/// registry compilado. Devuelve los ids faltantes; no vacío = error.
+pub fn missing_catalog_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM rules")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in rows {
+        present.insert(row?);
+    }
+    let missing: Vec<String> = gx_rules::all_rules()
+        .iter()
+        .filter(|r| !r.is_abstract())
+        .map(|r| r.id().to_string())
+        .filter(|id| !present.contains(id))
+        .collect();
+    Ok(missing)
+}
+
+/// GX-009: sembrar y validar; falla si el catálogo queda incompleto.
+pub fn seed_and_validate(conn: &Connection) -> Result<usize> {
+    let inserted = seed_from_registry(conn)?;
+    let missing = missing_catalog_ids(conn)?;
+    if !missing.is_empty() {
+        return Err(StorageError::Seed(format!(
+            "catálogo incompleto tras el seed; faltan: {}",
+            missing.join(", ")
+        )));
+    }
+    Ok(inserted)
 }

@@ -1,0 +1,16 @@
+rules:
+// CODIGO INICIATIVA: INIT-77
+// DESCRIPCION: parm multilínea con direcciones
+// RESPONSIBLE: qa
+// VERSION: 1.0.0
+
+parm(
+    in:&ClientId,
+    out:&ClientName
+)
+
+events:
+    // Prepara la salida
+    &ClientId = nullvalue(0)
+    msg(&ClientId)
+    msg(&ClientName)

@@ -1,0 +1,7 @@
+if &a = 1
+    if &b = 2
+        &x = 1
+    else
+        &x = 2
+    endif
+endif

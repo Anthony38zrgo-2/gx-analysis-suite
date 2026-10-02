@@ -59,7 +59,10 @@ define_rule! {
         }
         let mut issues: Vec<Issue> = Vec::new();
         if let Some(m) = HARDCODE_PATTERN.captures(&scan_target) {
-            let literal = m.get(2).unwrap().as_str().trim().to_string();
+            // El valor es el único grupo del patrón consolidado; el Python
+            // original usaba group(2) de un regex local con el operador
+            // capturado aparte (rule_gx_2_5.py:138).
+            let literal = m.get(1).unwrap().as_str().trim().to_string();
             if !SAFE_TRIVIAL_VALUES.contains(&literal.as_str()) {
                 let where_line_num = me.active_where_line.as_ref().unwrap().number;
                 issues.push(make_issue(

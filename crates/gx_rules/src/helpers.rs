@@ -27,6 +27,12 @@ pub const BODY_KEYWORDS: &[&str] = &[
 
 const COMPARISON_OPS: &[&str] = &["==", "!=", "<=", ">="];
 
+/// Palabras que INICIAN una continuación de condición WHERE (no cierran
+/// el bloque). GX-008 (adjudicado): en Python, `when`/`or`/`and`/`in`
+/// multi-línea se interpretaban como asignación y cerraban el where, así
+/// que GX.2.1/2.2/2.4/2.5 nunca las examinaban (falsos negativos).
+const WHERE_CONDITION_KEYWORDS: &[&str] = &["when", "or", "and", "in", "like", "between"];
+
 /// Return true if `lower` looks like a WHERE continuation line.
 pub fn is_where_continuation(lower: &str) -> bool {
     if lower.is_empty() {
@@ -38,6 +44,11 @@ pub fn is_where_continuation(lower: &str) -> bool {
     for kw in BODY_KEYWORDS {
         if lower == *kw || lower.starts_with(&format!("{kw} ")) {
             return false;
+        }
+    }
+    for kw in WHERE_CONDITION_KEYWORDS {
+        if lower == *kw || lower.starts_with(&format!("{kw} ")) {
+            return true;
         }
     }
     if lower.contains('=') && !COMPARISON_OPS.iter().any(|op| lower.contains(*op)) {

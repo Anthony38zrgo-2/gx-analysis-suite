@@ -34,6 +34,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
 
+  # GX-014/GATE-CLI: matriz de aceptación del CLI sobre un checkout limpio
+  # (sin Python ni repositorio hermano).
+  cli-matrix:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p gx_app --test cli_matrix --release
+
   audit:
     runs-on: windows-latest
     steps:

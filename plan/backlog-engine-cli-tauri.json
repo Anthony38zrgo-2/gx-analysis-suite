@@ -1,0 +1,654 @@
+{
+  "schemaVersion": "1.0.0",
+  "project": "gx-linter-rs",
+  "title": "Execution backlog: reliable GeneXus engine, production CLI, then Tauri 2 desktop UI",
+  "createdOn": "2026-10-01",
+  "status": "en-ejecucion (M0-M2 completados 2026-10-02; M3 pendiente — ver executionState)",
+  "supersedesForExecution": "plan/migration-rust.json",
+  "executionState": {
+    "updatedAt": "2026-10-02",
+    "milestonesDone": [
+      { "id": "M0", "gate": "GATE-BASELINE", "closedOn": "2026-10-02", "stories": ["GX-001", "GX-002"] },
+      { "id": "M1", "gate": "GATE-ENGINE", "closedOn": "2026-10-02", "stories": ["GX-003", "GX-004", "GX-005", "GX-006", "GX-007", "GX-008"] },
+      { "id": "M2", "gate": "GATE-CLI", "closedOn": "2026-10-02", "stories": ["GX-009", "GX-010", "GX-011", "GX-012", "GX-013", "GX-014"] }
+    ],
+    "milestonesPending": [{ "id": "M3", "gate": "GATE-DESKTOP", "stories": ["GX-015", "GX-016", "GX-017", "GX-018"], "optional": ["GX-019", "GX-020"] }],
+    "verificationAtHandoff": {
+      "cargoFmtCheck": "pass",
+      "cargoClippy": "pass (-D warnings, --all-targets)",
+      "cargoTestWorkspace": "pass (85 tests, 0 ignored; incluye exports reales RAR/ZIP)",
+      "cargoBuildRelease": "pass",
+      "cliMatrix": "17/17 tests sobre el binario real (incluye 3 casos de exports reales)"
+    },
+    "storiesDone": [
+      "GX-001", "GX-002", "GX-003", "GX-004", "GX-005", "GX-006", "GX-007", "GX-008",
+      "GX-009", "GX-010", "GX-011", "GX-012", "GX-013", "GX-014"
+    ],
+    "postM2RealExports": {
+      "doneOn": "2026-10-02",
+      "summary": "Validación con los exports reales de examples/: soporte RAR (unrar + build.rs), contenedores por magic (.xpz/.zip/.rar), parser ExportFile/GXObject (Events+Rules+Subroutines; excluye Documentation/Layout), contrato sin código (PASS 0 + aviso), snapshot adjudicado con spot-checks.",
+      "fixtures": "tests/fixtures/sources/real/{HJFCP716.xpz(RAR),JBMP018.xpz,HJFCQ350.xpz,jngz293.xpz} + tests/fixtures/real_exports/manifest.json",
+      "tests": "crates/gx_engine/tests/real_exports.rs (5) + 3 casos nuevos en crates/gx_app/tests/cli_matrix.rs",
+      "docs": "tests/fixtures/BASELINE.md (sección Exports reales) + README (formatos y licencia UnRAR)"
+    },
+    "adjudications": [
+      "GX-004: el golden ganó 5 hallazgos (2×GX.2.7.1@55/56, 2×endfor sin tabla GX.1.3@69/70, DEFINED BY faltante GX.1.3@61) por ramas muertas del despacho Python; baseline efectivo = 22 hallazgos (14E/8W) en tests/fixtures/golden_adjudications.json; golden_issues.json (Python) intacto.",
+      "GX-008: bloques /* */ multilínea se enmascaran (Python linteaba código deshabilitado); when/or/and/in/like/between en línea propia ya no cierran el where (falsos negativos de Python). Detalles en tests/fixtures/BASELINE.md."
+    ],
+    "sessionHandoff": {
+      "startHere": "M3 (GATE-DESKTOP): empezar por GX-015 con la especificación extendida en las historias de E05/E06 (campo handoffSpec).",
+      "stateSnapshot": {
+        "engine": "gx_engine::runtime::{analyze(request) -> AnalysisResult, scan_file, build_rules, run_file, evaluate_files_parallel} — sin dependencia de clap/Tauri; emisión determinista (objeto→línea→registro de regla); reset por objeto; finalize por objeto.",
+        "contract": "gx_core::models::{AnalysisRequest, AnalysisResult, QgPolicy::{Absolute,Percentage}, QgVerdict::{Pass,Reject,Error}, ScanFailure, Issue{object:Option<ObjectRef>}, ObjectRef{id,object_type,package,member,container_path}, SourceObject{text,code_start_line}, AuditContext}",
+        "storage": "gx_storage::db::{init_db(), init_db_at(path), init_memory_db()} siembra y valida el catálogo (seed_from_registry, 24 concretas/15 habilitadas); audit_dao::persist_run atómico; V003 agrega identidad de objeto y policy/verdict/failures_json.",
+        "cli": "gx scan [path|--file] --format text|json --max-errors --max-warnings --error-pct --enable --disable --rules-csv --record-history --db · gx rules list|enable|disable · exit codes: 0 pass, 1 reject, 2 invocación, 3 fallo de scan.",
+        "tests": "tests/fixtures: golden (sources/ejemplo_codigo.txt + golden_issues.json + golden_adjudications.json + BASELINE.md), cases/ (~50 por regla), dialects/ (8), sources/sample_package.xpz + unusable_package.xpz + proc_malo.xml + clean_object.txt; regenerar XPZ: cargo run -p gx_core --example make_xpz_fixture.",
+        "rules": "24 concretas + 6 abstractas en gx_rules (define_rule! con route = tokens opcional); 7 sin estado con ruta Tokens; resto AllLines; orden determinista de textos garantizado (1.1/1.4.2/2.7.4 ordenan sets)."
+      },
+      "knowBeforeStarting": [
+        "GATE-CLI ya pasó: NO romper la paridad golden (22/14/8) ni la matriz CLI; cualquier cambio de comportamiento se adjudica con fixture + razón (regla de ejecución 5).",
+        "El CLI nunca escribe en disco por defecto; --record-history es opt-in (CI limpio).",
+        "El desktop DEBE usar el MISMO AnalysisRequest/AnalysisResult (no duplicar lint logic en TypeScript).",
+        "El scaffold egui de gx_app/src/main.rs debe eliminarse en GX-015 (es la única GUI hermana del CLI bin).",
+        "Los tests de gx_app usan env!(\"CARGO_BIN_EXE_gx\"); el patrón existe en crates/gx_app/tests/cli_matrix.rs."
+      ]
+    }
+  },
+  "scope": {
+    "primaryGoal": "Lint exported legacy GeneXus source with trustworthy, traceable diagnostics from a Rust CLI before exposing the same engine through a Tauri 2 desktop application.",
+    "deliveryOrder": ["engine correctness", "legacy input fidelity", "rule validation", "operational CLI", "desktop integration", "release packaging"],
+    "targetStack": {
+      "engine": "Rust Cargo workspace",
+      "storage": "SQLite via gx_storage",
+      "cli": "clap-based gx binary",
+      "desktop": "Tauri 2 with Vue 3, TypeScript, Vite, and Tailwind CSS"
+    },
+    "deferred": [
+      "An eframe/egui implementation; replace the old GUI direction with Tauri 2.",
+      "Direct inspection of a live GeneXus knowledge base unless an export or supported adapter is explicitly provided.",
+      "PDF as a prerequisite for the first functional CLI release."
+    ]
+  },
+  "baselineEvidence": {
+    "verified": [
+      "cargo test --workspace passes 10 tests; no engine or rule integration tests run.",
+      "cargo fmt --all -- --check passes.",
+      "cargo clippy --workspace --all-targets -- -D warnings passes.",
+      "gx --file accepts an argument but prints a scaffold message without linting.",
+      "The GUI and gx_report are scaffolds; no Vue frontend exists.",
+      "The workspace contains 30 rule types, including 24 concrete rules and six abstract grouping rules."
+    ],
+    "qualification": "Compilation and small unit tests do not establish detection accuracy, Python parity, or production readiness.",
+    "existingArtifacts": [
+      "tests/fixtures/golden_issues.json",
+      "tests/fixtures/rule_manifest.json",
+      "tests/fixtures/golden_snapshot_cli.txt",
+      "Reglas.csv"
+    ]
+  },
+  "priorityModel": {
+    "P0": "Correctness or observability blocker; required before claiming a working engine.",
+    "P1": "Required for the first operational CLI and legacy export support.",
+    "P2": "Required for the Tauri desktop release after the CLI gate passes.",
+    "P3": "Post-CLI enhancement that must not block basic linting."
+  },
+  "executionRules": [
+    "Implement stories in dependency order. Do not start desktop integration before GATE-CLI passes.",
+    "Keep the Rust engine independent of clap, Tauri, Vue, and PDF generation.",
+    "Add regression tests that demonstrate a reported defect before changing dispatch, rule state, or source mapping.",
+    "Return explicit errors for unreadable or unsupported input; never represent a failed scan as a clean result.",
+    "Treat Python output as a compatibility baseline, then adjudicate any differences caused by a demonstrable Python defect.",
+    "Preserve user configuration and existing audit history during migrations and reseeding.",
+    "Do not claim full legacy-version coverage until representative exports and expected results have been supplied and verified."
+  ],
+  "milestones": [
+    {
+      "id": "M0",
+      "name": "Reproducible correctness baseline",
+      "exitGate": "GATE-BASELINE"
+    },
+    {
+      "id": "M1",
+      "name": "Reliable library engine for supported exports",
+      "exitGate": "GATE-ENGINE"
+    },
+    {
+      "id": "M2",
+      "name": "Operational and testable CLI",
+      "exitGate": "GATE-CLI"
+    },
+    {
+      "id": "M3",
+      "name": "Tauri 2 desktop application",
+      "exitGate": "GATE-DESKTOP"
+    }
+  ],
+  "epics": [
+    {
+      "id": "E00",
+      "name": "Ground truth and test harness",
+      "priority": "P0",
+      "milestone": "M0",
+      "stories": [
+        {
+          "id": "GX-001",
+          "title": "Make the golden source reproducible",
+          "priority": "P0",
+          "dependsOn": [],
+          "targets": ["tests/fixtures", "scripts/gen_baseline.py"],
+          "agentActions": [
+            "Locate or add a committed, redistributable GeneXus source fixture corresponding to golden_issues.json; record its SHA-256 and provenance.",
+            "Document the Python baseline version, enabled rule set, and deterministic comparison fields.",
+            "Avoid depending on a sibling repository or local virtual environment for routine Rust tests."
+          ],
+          "acceptanceCriteria": [
+            "A clean checkout contains everything needed to run the Rust parity test.",
+            "The fixture-to-golden relationship is machine checked and no generated PDF path or timing is compared."
+          ]
+        },
+        {
+          "id": "GX-002",
+          "title": "Build end-to-end engine and rule regression tests",
+          "priority": "P0",
+          "dependsOn": ["GX-001"],
+          "targets": ["crates/gx_engine", "crates/gx_rules", "tests/fixtures"],
+          "agentActions": [
+            "Run the public engine entry point against the golden fixture and compare rule ID, severity, source location, and stable diagnostic text.",
+            "Add minimal positive and negative fixtures for every concrete rule, emphasizing state transitions and nested blocks.",
+            "Test repeated scans, different files, enabled-rule filtering, deterministic output ordering, and zero-finding files."
+          ],
+          "acceptanceCriteria": [
+            "The suite fails against the documented dispatch and reset defects and passes after they are corrected.",
+            "All 24 concrete rules are exercised by at least one behavior-level test."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "E01",
+      "name": "Engine lifecycle and dispatch correctness",
+      "priority": "P0",
+      "milestone": "M1",
+      "stories": [
+        {
+          "id": "GX-003",
+          "title": "Reset every rule for every source object",
+          "priority": "P0",
+          "dependsOn": ["GX-002"],
+          "targets": ["crates/gx_engine/src/runtime.rs", "crates/gx_rules/src/base.rs"],
+          "agentActions": [
+            "Call Rule::reset with the actual source path before evaluating any line or finalizing each object.",
+            "Ensure sequential and parallel entry points share the same lifecycle contract.",
+            "Verify diagnostics always carry the real file path and that state never leaks across scans."
+          ],
+          "acceptanceCriteria": [
+            "Running one rule instance on A then B produces the same diagnostics for B as a fresh instance.",
+            "No emitted issue uses the placeholder path Unknown."
+          ]
+        },
+        {
+          "id": "GX-004",
+          "title": "Replace unsafe line-trigger dispatch for stateful rules",
+          "priority": "P0",
+          "dependsOn": ["GX-002", "GX-003"],
+          "targets": ["crates/gx_engine/src/dispatch.rs", "crates/gx_engine/src/runtime.rs", "crates/gx_rules/src/rules"],
+          "agentActions": [
+            "Specify each rule's required start, continuation, body, and closing events; select a dispatch strategy that delivers all of them.",
+            "Cover For Each/Where/Defined By/EndFor, Case/Otherwise/EndCase, Sub/body/EndSub, comments, and multiline parm blocks.",
+            "Retain a simple all-lines route for rules whose state cannot be safely described by isolated tokens.",
+            "Remove the current fallback assumption that a nonempty candidate set implies all relevant rules were selected."
+          ],
+          "acceptanceCriteria": [
+            "A WHERE continuation without the word where is examined by active WHERE rules.",
+            "GX.1.3 receives where, defined by, and endfor; GX.2.6 receives nullvalue assignments; GX.1.3.3 receives otherwise.",
+            "Dispatch results match an all-rules-per-line reference implementation on the regression corpus."
+          ]
+        },
+        {
+          "id": "GX-005",
+          "title": "Make scans deterministic and error transparent",
+          "priority": "P0",
+          "dependsOn": ["GX-003", "GX-004"],
+          "targets": ["crates/gx_engine/src/runtime.rs"],
+          "agentActions": [
+            "Sort candidate evaluation and final diagnostics by a documented stable key while preserving meaningful source order.",
+            "Change parallel evaluation to return per-file success or a contextual error, never an empty success on failure.",
+            "Define behavior for a missing file, invalid XPZ, encoding failure, and per-file partial failure."
+          ],
+          "acceptanceCriteria": [
+            "Repeated and parallel scans produce identical ordered diagnostics.",
+            "A corrupt input causes a visible non-success result and cannot pass a quality gate as zero findings."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "E02",
+      "name": "Legacy source fidelity and diagnostics",
+      "priority": "P1",
+      "milestone": "M1",
+      "stories": [
+        {
+          "id": "GX-006",
+          "title": "Model source objects and preserve original locations",
+          "priority": "P1",
+          "dependsOn": ["GX-003"],
+          "targets": ["crates/gx_core/src/models.rs", "crates/gx_core/src/xpz_extractor.rs", "crates/gx_engine/src/runtime.rs"],
+          "agentActions": [
+            "Replace XPZ member concatenation as the diagnostic coordinate system with a source-object model containing container path, member/object identity, section, original line, and text.",
+            "Evaluate each XPZ object independently so rule state and generated-subroutine boundaries do not cross objects.",
+            "Expose a stable source reference usable by CLI JSON and a desktop code viewer."
+          ],
+          "acceptanceCriteria": [
+            "A finding in the second XPZ member points to that member's original line rather than a synthetic concatenated line.",
+            "The same object exported as XML and inside XPZ yields equivalent rule findings."
+          ]
+        },
+        {
+          "id": "GX-007",
+          "title": "Harden export discovery, decoding, and XPZ parsing",
+          "priority": "P1",
+          "dependsOn": ["GX-006"],
+          "targets": ["crates/gx_core/src/filesystem.rs", "crates/gx_core/src/xpz_extractor.rs"],
+          "agentActions": [
+            "Include .xml in explicit source discovery and reject unrelated files rather than linting arbitrary fallback files.",
+            "Test UTF-8 with and without BOM, Windows-1252 and other confirmed legacy encodings against actual exports.",
+            "Validate ZIP members and XML Events extraction; bound archive size, member count, and expanded bytes.",
+            "Replace raw-XML fallback with an explicit unsupported-layout diagnostic unless a documented source-bearing section can be extracted.",
+            "POST-M2 (2026-10-02): detectar contenedor por magic bytes (ZIP o RAR; GeneXus empaqueta con WinRAR) y aceptar .zip explícito por contenido; build.rs de linkeo advapi32/crypt32 para unrar_sys; parser ExportFile/GXObject (identidad Info/Name+Info/Folder, código Events+Rules+Subroutines, excluir Documentation/Layout/Help/Structure).",
+            "POST-M2: contrato sin código refinado: objetos GeneXus reconocidos sin secciones de código = PASS con 0 hallazgos + warning a stderr; solo un layout sin GXObject ni Events es 'no soportado'."
+          ],
+          "acceptanceCriteria": [
+            "Supported extensions and encodings are documented and tested.",
+            "An XPZ without usable source is reported as unsupported, never silently linted as XML markup. Los exports con objetos reconocidos sin código escanean como PASS 0 con aviso (nunca como error ni como linteo de markup).",
+            "Exports reales (ZIP y RAR) fijan snapshot adjudicado en tests/fixtures/real_exports/manifest.json (hash + conteos + spot-checks verificados contra la fuente)."
+          ]
+        },
+        {
+          "id": "GX-008",
+          "title": "Validate legacy dialects and rule semantics",
+          "priority": "P1",
+          "dependsOn": ["GX-002", "GX-004", "GX-007"],
+          "targets": ["crates/gx_rules", "tests/fixtures"],
+          "agentActions": [
+            "Collect representative exports and expected findings for each target GeneXus version and object type.",
+            "Audit all 24 concrete rules for syntax variants, nested scopes, comments, string literals, and false positives.",
+            "Specifically verify hardcoded-string checks after ParsedLine removes literals and verify cases with multiline comments and expressions.",
+            "Record any intentional policy difference from the Python implementation as an explicit regression decision.",
+            "POST-M2 (2026-10-02): exports reales recolectados (4: WebPanel/Procedure/Transaction; ZIP y RAR) con spot-checks verificados manualmente (Sub sin nullvalue, OR en Where, hardcodes, If sin Else, Parm sin direcciones) y snapshot en tests/fixtures/real_exports/manifest.json. Exclusión documentada: variantes de export de otras versiones GX (p.ej. GX16/Evo) hasta contar con muestras."
+          ],
+          "acceptanceCriteria": [
+            "A version/object support matrix names verified fixtures and known exclusions.",
+            "Every accepted rule difference is reviewed with an input example and expected output.",
+            "La matriz de exports reales vive en tests/fixtures/BASELINE.md (contenedores, secciones lintadas/excluidas, contrato sin código) y el snapshot real fija los conteos por regla."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "E03",
+      "name": "Rule configuration and persistence",
+      "priority": "P1",
+      "milestone": "M2",
+      "stories": [
+        {
+          "id": "GX-009",
+          "title": "Initialize a complete and trustworthy rule catalog",
+          "priority": "P1",
+          "dependsOn": ["GX-002"],
+          "targets": ["crates/gx_storage/src/db.rs", "crates/gx_storage/src/seed.rs", "crates/gx_storage/src/dao/rules_dao.rs"],
+          "agentActions": [
+            "Make first-run initialization populate all expected rule metadata and the intended 15-rule default enabled set.",
+            "Make CSV reseeding idempotent and preserve user enabled flags; validate catalog IDs against the compiled registry.",
+            "Propagate SQL/configuration failures instead of interpreting them as enabled rules.",
+            "Resolve the current zero-rule migration state and verify seeding is actually invoked by the application."
+          ],
+          "acceptanceCriteria": [
+            "A fresh database has 24 concrete rule records and the expected enabled count.",
+            "A second startup changes no enabled flags; a corrupt database yields an error rather than a silent all-rules scan."
+          ]
+        },
+        {
+          "id": "GX-010",
+          "title": "Separate analysis policy from persistence and define quality gates",
+          "priority": "P1",
+          "dependsOn": ["GX-009"],
+          "targets": ["crates/gx_core/src/models.rs", "crates/gx_engine", "crates/gx_storage"],
+          "agentActions": [
+            "Introduce a serializable AnalysisRequest and AnalysisResult with explicit enabled rules, input list, metrics, diagnostics, warnings, and scan failures.",
+            "Keep the engine callable with an in-memory rule configuration for deterministic tests and a read-only mode.",
+            "Implement named quality-gate policies: CLI absolute error/warning thresholds and the legacy GUI percentage policy; record which policy produced a verdict.",
+            "Define whether scan errors always fail the quality gate and how zero findings are scored."
+          ],
+          "acceptanceCriteria": [
+            "The same request yields the same findings with or without SQLite history enabled.",
+            "CLI and percentage policy tests cover pass, reject, zero findings, and scan errors."
+          ]
+        },
+        {
+          "id": "GX-011",
+          "title": "Persist audit runs atomically and expose history",
+          "priority": "P1",
+          "dependsOn": ["GX-006", "GX-009", "GX-010"],
+          "targets": ["crates/gx_storage/src/dao/audit_dao.rs", "migrations"],
+          "agentActions": [
+            "Store run metadata, object-aware issue locations, metrics, policy, verdict, and failures in one transaction.",
+            "Version schema changes and test migration from an existing database without deleting user data.",
+            "Keep history optional for CI/read-only CLI use."
+          ],
+          "acceptanceCriteria": [
+            "A failed issue insert rolls back the complete run.",
+            "Historical issues retain enough source identity to reopen the correct XPZ member."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "E04",
+      "name": "Operational CLI",
+      "priority": "P1",
+      "milestone": "M2",
+      "stories": [
+        {
+          "id": "GX-012",
+          "title": "Implement gx scan and rule-management commands",
+          "priority": "P1",
+          "dependsOn": ["GX-005", "GX-007", "GX-009", "GX-010"],
+          "targets": ["crates/gx_app/src/bin/gx.rs"],
+          "agentActions": [
+            "Replace the scaffold with scan of one file or a directory, recursive discovery, explicit include/exclude filters, and selected rule profiles.",
+            "Retain --file, --max-errors, and --max-warnings compatibility where practical; provide --help, version, list-rules, and rule enable/disable operations.",
+            "Print a concise human summary with source-aware diagnostics and quality-gate outcome.",
+            "Use documented exit codes for pass, policy rejection, invalid invocation, and scan/infrastructure failure."
+          ],
+          "acceptanceCriteria": [
+            "gx --file <fixture> analyzes the file and returns actual findings rather than a scaffold message.",
+            "A missing path exits nonzero with a useful stderr message; --help is accurate."
+          ]
+        },
+        {
+          "id": "GX-013",
+          "title": "Add machine-readable CLI output and deterministic CI behavior",
+          "priority": "P1",
+          "dependsOn": ["GX-010", "GX-012"],
+          "targets": ["crates/gx_app/src/bin/gx.rs", "crates/gx_core/src/models.rs"],
+          "agentActions": [
+            "Implement --format text|json with a versioned JSON schema and stable diagnostic ordering.",
+            "Keep stdout valid JSON in JSON mode; send progress and operational errors to stderr.",
+            "Expose input provenance, source object, line, rule, severity, metrics, policy, verdict, and scan failures.",
+            "Document an optional no-history mode and avoid unrequested writes during CI scans."
+          ],
+          "acceptanceCriteria": [
+            "JSON mode parses as one complete document on pass and policy rejection.",
+            "Snapshot tests cover stdout, stderr, and exit codes on Windows."
+          ]
+        },
+        {
+          "id": "GX-014",
+          "title": "Run a CLI acceptance matrix on real exports",
+          "priority": "P1",
+          "dependsOn": ["GX-008", "GX-011", "GX-013"],
+          "targets": ["tests", ".github/workflows/ci.yml", "README.md"],
+          "agentActions": [
+            "Exercise text, XML, XPZ, multi-object XPZ, directory, clean file, malformed input, encoding variants, and quality-gate rejection through the compiled gx binary.",
+            "Compare the golden fixture and adjudicated legacy corpus against expected findings.",
+            "Run fmt, clippy, tests, and release build in CI; record CLI commands and sample outputs in the README."
+          ],
+          "acceptanceCriteria": [
+            "GATE-CLI passes on a clean checkout without Python or the sibling repository.",
+            "No supported input failure is reported as a clean scan."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "E05",
+      "name": "Tauri 2 application boundary",
+      "priority": "P2",
+      "milestone": "M3",
+      "stories": [
+        {
+          "id": "GX-015",
+          "title": "Create the Tauri 2, Vue 3, TypeScript, Vite, and Tailwind shell",
+          "priority": "P2",
+          "dependsOn": ["GX-014"],
+          "targets": ["desktop/", "Cargo.toml", "crates/gx_app/src/main.rs"],
+          "handoffSpec": {
+            "objective": "Shell Tauri 2 arrancable en Windows con frontend Vue 3 + TypeScript + Vite + Tailwind, vinculado a las crates existentes, sin tocar el CLI.",
+            "steps": [
+              "Crear directorio `desktop/` con proyecto Tauri 2: usar `npm create tauri-app@latest` (template vue-ts) o estructura manual: package.json (vue 3.5, vite 6, typescript 5, @vitejs/plugin-vue, tailwindcss 4, @tauri-apps/api 2, @tauri-apps/cli 2), vite.config.ts, tsconfig.json, tailwind config, src/ (main.ts, App.vue, router opcional).",
+              "Configurar `desktop/src-tauri/`: Cargo.toml del app (tauri 2 con features default, tauri-build), tauri.conf.json (productName 'gx-linter', identifier 'com.gx.linter', ventana por defecto 1280x800, devUrl http://localhost:5173, frontendDist ../dist), capabilities mínimas (core:default + dialogs:allow-open si se usa dialog nativo).",
+              "Integrar las crates existentes como dependencias path: desktop/src-tauri/Cargo.toml → gx_core, gx_engine, gx_storage (path = '../../crates/...'). NO agregar dependencia a clap.",
+              "Crear workspace separado para el app desktop (desktop/src-tauri tiene su propio Cargo.toml como workspace raíz de esa carpeta) para NO acoplar el workspace principal del engine al toolchain frontend; alternativa aceptada: agregar como member del workspace principal si no rompe `cargo test --workspace`.",
+              "Eliminar el scaffold egui: borrar `crates/gx_app/src/main.rs` (bin gx_linter_gui) y su [[bin]] de crates/gx_app/Cargo.toml; actualizar README/PROGRESS que aún mencionan eframe/egui.",
+              "Definir comandos: dev = `npm run tauri dev`, build = `npm run tauri build`; documentarlos en README (sección Desktop).",
+              "Vista inicial Vue mínima: App.vue con layout Tailwind + componente placeholder 'Scan' que llame (por ahora stub) al comando ping definido en Rust (invoke_handler con #[tauri::command] fn ping() -> String)."
+            ],
+            "risks": [
+              "Tauri 2 requiere Rust stable reciente y WebView2 en Windows (preinstalado en Win10/11 recientes); documentar prerequisito.",
+              "MSVC toolchain necesario para el build del shell Rust."
+            ]
+          },
+          "agentActions": [
+            "Add a Tauri 2 shell linked to existing Rust crates and a Vue 3 frontend using TypeScript, Vite, and Tailwind CSS.",
+            "Remove the unused egui scaffold from the delivered GUI path and update documentation that still selects egui.",
+            "Define development and production commands, window defaults, and minimal Tauri capabilities."
+          ],
+          "acceptanceCriteria": [
+            "The desktop app starts and renders a Vue view on Windows.",
+            "The gx CLI still builds and runs independently of the frontend toolchain.",
+            "cargo test --workspace sigue en verde (el workspace del engine no depende del toolchain frontend)."
+          ]
+        },
+        {
+          "id": "GX-016",
+          "title": "Expose safe asynchronous Rust commands to the frontend",
+          "priority": "P2",
+          "dependsOn": ["GX-015", "GX-010", "GX-011"],
+          "targets": ["desktop/src-tauri/src/commands.rs", "desktop/src/api/client.ts"],
+          "handoffSpec": {
+            "objective": "Capa de comandos Tauri async segura y tipada que REUTILICE el contrato AnalysisRequest/AnalysisResult existente.",
+            "commands": [
+              "scan(request: AnalysisRequest, on_progress: tauri::ipc::Channel<ScanProgressEvent>) -> AnalysisResult — ejecutar en spawn_blocking (rayon ya paraleliza internamente vía analyze()); emitir progreso por archivo con per-file status (pendiente/ok/fallo) usando tauri Channel; soportar cancelación con AtomicBool compartido (chequeo en evaluate_files_parallel_with_ctx o envolver por archivo).",
+              "pick_source_files() -> Vec<PathBuf> — diálogo nativo (plugin dialog); validar extensiones en Rust (la misma lista SOURCE_EXTENSIONS de gx_core::filesystem).",
+              "list_rules(rules_csv: Option<String>) -> Vec<RuleRecord> — vía gx_storage::dao::rules_dao::get_all (concrete only como el CLI) o import_reglas_csv en memoria.",
+              "set_rule_enabled(id: String, enabled: bool) — gx_storage (base local del usuario; misma init_db que el CLI).",
+              "get_settings/set_settings — gx_storage::dao::settings_dao.",
+              "list_audit_runs(limit) / get_audit_issues(run_id) — audit_dao::list_runs / get_issues_for_run (reconstruye ObjectRef → el visor puede abrir el miembro correcto).",
+              "render_text_summary(result: AnalysisResult) -> String — reutilizar el formato del CLI (extraer la función print_text_summary a gx_core o duplicarla conscientemente; decisión documentada)."
+            ],
+            "types": [
+              "Serializar TODOS los tipos del contrato con serde (ya derivan Serialize/Deserialize: AnalysisRequest/Result, Issue, ObjectRef, QgPolicy, QgVerdict, ScanFailure, AuditMetrics).",
+              "Generar tipos TypeScript espejo manualmente en desktop/src/api/types.ts (o con ts-rs/specta si se decide; opción simple: mirror manual con test de deserialización cruzada).",
+              "ScanProgressEvent { path, status: 'pending'|'ok'|'error', findings_count, error? }."
+            ],
+            "boundary": [
+              "Validar paths en el comando Rust (no confiar en el frontend): rechazar rutas inexistentes con error estructurado {code, message} — nunca panic.",
+              "Los errores Rust → Result<T, CommandError> con thiserror; el frontend mapea message a UI.",
+              "NO duplicar lint logic en TypeScript: el frontend sólo construye AnalysisRequest y muestra AnalysisResult."
+            ],
+            "tests": [
+              "Test de paridad CLI↔desktop a nivel de Rust: mismo AnalysisRequest → mismo AnalysisResult (ya cubierto por analyze_contract::same_request_same_result_with_or_without_history; agregar un test que ejecute analyze() y afirme idéntico resultado con el set del GUI).",
+              "Test del comando scan con Channel capturando eventos de progreso (tauri::test feature)."
+            ]
+          },
+          "agentActions": [
+            "Expose typed commands for file selection, scan start/cancel, rule catalog/configuration, settings, and audit history.",
+            "Execute CPU-bound scans away from the UI thread and emit progress with per-file status.",
+            "Validate paths and payloads at the Rust boundary; return structured errors with actionable messages.",
+            "Use the same AnalysisRequest and AnalysisResult contract as the CLI; do not duplicate lint logic in TypeScript."
+          ],
+          "acceptanceCriteria": [
+            "The UI remains responsive during a directory scan and displays failures per file.",
+            "A CLI and desktop scan with identical request and rule set produce identical findings.",
+            "Los errores del comando llegan al frontend como mensajes estructurados, no panic/500."
+          ]
+        },
+        {
+          "id": "GX-017",
+          "title": "Build the audit workflow and source-aware results UI",
+          "priority": "P2",
+          "dependsOn": ["GX-016"],
+          "targets": ["desktop/src/components/", "desktop/src/views/", "desktop/src/store/"],
+          "handoffSpec": {
+            "objective": "UI completa de auditoría source-aware, con reglas, historial y estados accesibles.",
+            "views": [
+              "ScanView: selector de archivo/directorio (comando pick_source_files o input manual), opciones del scan (política: absolute max_errors/max_warnings vs percentage; --enable/--disable → enabled_rule_ids del AnalysisRequest), botón Iniciar/Cancelar, barra de progreso con eventos Channel.",
+              "ResultsView: métricas (total/errors/warnings/info), veredicto con política, badge prominente para failures (nunca mostrar como limpio), tabla de hallazgos filtrable por regla/severidad/objeto (los Issue ya traen object ObjectRef), orden estable.",
+              "SourceViewer: al clic en un hallazgo, obtener el texto del SourceObject (comando read_object_source(container_path, member) en Rust usando extract_source_objects) y anclar a line_number real (miembro-local); navegación anterior/siguiente hallazgo; resaltado de la línea.",
+              "RulesView: catálogo (24 concretas) con toggle enable/disable → set_rule_enabled; indicador del set efectivo; rerun del audit sin reiniciar la app.",
+              "HistoryView: list_runs + get_issues_for_run → misma ResultsView reutilizada (datos históricos conservan ObjectRef)."
+            ],
+            "store": "Pinia (o composables simples) para estado del scan en curso, resultados y configuración; mantener TypeScript estricto.",
+            "ux": [
+              "Estados de carga y vacíos; skeleton en la tabla para resultados grandes (virtualizar si > 1000 filas con vue-virtual-scroller o similar).",
+              "Atajos de teclado (j/k o flechas para navegar hallazgos, Enter para abrir en visor), focus visible, labels accesibles (aria), contraste AA.",
+              "Errores por archivo visibles en la barra de progreso y en un panel de 'Fallos de scan' separado de los hallazgos."
+            ],
+            "fixturesDePrueba": "usar tests/fixtures/sources/sample_package.xpz (ProcMalo con 2 hallazgos miembro-local, ProcBueno limpio) y ejemplo_codigo.txt (22 hallazgos) como datos de desarrollo del visor."
+          },
+          "agentActions": [
+            "Implement input selection, scan options, progress, metrics, gate status, filterable diagnostics, and a source viewer anchored to object and original line.",
+            "Show unsupported inputs and partial failures prominently; never display them as a clean result.",
+            "Add rule configuration and history views backed by the command layer.",
+            "Make keyboard navigation, focus states, accessible labels, loading states, and large-result rendering part of the implementation."
+          ],
+          "acceptanceCriteria": [
+            "A user can inspect a finding inside the correct XPZ member and navigate to its original line.",
+            "The interface can configure rules and rerun an audit without restarting.",
+            "Un scan con archivo corrupto muestra el fallo destacado, nunca un resultado limpio."
+          ]
+        },
+        {
+          "id": "GX-018",
+          "title": "Validate and package the desktop release",
+          "priority": "P2",
+          "dependsOn": ["GX-017"],
+          "targets": ["desktop/src-tauri/tauri.conf.json", ".github/workflows/ci.yml", "README.md"],
+          "handoffSpec": {
+            "objective": "Release validado e instalador Windows, con datos de usuario preservados.",
+            "steps": [
+              "tauri.conf.json: bundle targets NSIS (installer) para Windows; iconos generados con `npm run tauri icon`.",
+              "Verificar assets embebidos: el binario Rust incluye el dist de Vue en producción (frontendDist); el app NO necesita Node en runtime.",
+              "Workflow CI: job desktop (windows-latest, si se aprueba costo) que instala Node 20, `npm ci`, `npm run tauri build`, sube el artefacto NSIS; los jobs del CLI/engine ya existen y NO dependen de Node.",
+              "Pruebas de upgrade: abrir la base local de una instalación previa (gx_storage::db::init_db hace migraciones V1→V3 sin borrar datos; ya cubierto por tests de migración) y validar que reglas y historial sobreviven.",
+              "README: sección Desktop con prerequisitos (WebView2, MSVC), ubicación de datos (%APPDATA%/GX/Linter/gx_linter.db), y troubleshooting (WebView2 faltante, WebView bloqueado por políticas)."
+            ],
+            "checks": [
+              "Lista de verificación manual del flujo: seleccionar archivo → scan → ver hallazgos → abrir miembro XPZ → configurar regla → rerun → history.",
+              "Verificar que el instalador corre con el antivirus defensor de Windows sin falsos positivos graves (si ocurre, documentar firma pendiente)."
+            ]
+          },
+          "agentActions": [
+            "Run desktop integration and visual workflow checks on representative legacy exports.",
+            "Build a Windows installer and verify bundled assets, migrations, rule catalog, file dialogs, and upgrade behavior.",
+            "Document installation prerequisites, local data locations, and a troubleshooting path."
+          ],
+          "acceptanceCriteria": [
+            "GATE-DESKTOP passes from a clean build and installed package.",
+            "Installation and upgrade preserve rule preferences and audit history."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "E06",
+      "name": "Optional reporting and maintenance",
+      "priority": "P3",
+      "milestone": "M3",
+      "stories": [
+        {
+          "id": "GX-019",
+          "title": "Implement PDF export on top of the shared result model",
+          "priority": "P3",
+          "dependsOn": ["GX-010", "GX-013"],
+          "targets": ["crates/gx_report", "crates/gx_app/src/bin/gx.rs"],
+          "handoffSpec": {
+            "objective": "PDF source-aware generado desde AnalysisResult SIN re-ejecutar el engine.",
+            "steps": [
+              "Elegir generador: `printpdf` (puro Rust, control bajo) o `typst`/`wkhtmltopdf` externo — recomendado printpdf por dependencia mínima; abstraer detrás de `gx_report::render(result: &AnalysisResult, out_path: &Path) -> Result<()>`.",
+              "Contenido: portada con métricas/veredicto/política + tabla paginada de hallazgos (regla, severidad, objeto id/member, línea real, descripción); envolver texto Unicode largo con paginación manual.",
+              "CLI: `gx export-pdf --result-file <json> --out <pdf>` (el JSON es AnalysisResult serializado; también flag `--pdf` en scan opcional). El fallo del PDF NO altera el exit code del lint.",
+              "Desktop: botón 'Exportar PDF' en ResultsView que llame el comando save_pdf(result) (diálogo nativo + render).",
+              "Tests: pdf de ejemplo_codigo.txt → abrir/contar páginas (pdf-extract o verificación de bytes %PDF header) + total de hallazgos coincidente con el JSON; Unicode (í/á/é), paths largos, listas grandes (1000 hallazgos sintéticos)."
+            ]
+          },
+          "agentActions": [
+            "Generate a source-aware PDF from AnalysisResult without rerunning the engine.",
+            "Expose export from CLI and desktop only after text/JSON results are stable.",
+            "Test pagination, Unicode GeneXus text, long paths, and large finding lists."
+          ],
+          "acceptanceCriteria": [
+            "PDF totals and diagnostics match the corresponding JSON result.",
+            "PDF failure does not alter the lint verdict or discard diagnostics."
+          ]
+        },
+        {
+          "id": "GX-020",
+          "title": "Align documentation, release helpers, and CI with actual delivery",
+          "priority": "P3",
+          "dependsOn": ["GX-014", "GX-018"],
+          "targets": ["README.md", "plan/PROGRESS.md", "crates/xtask", ".github/workflows/ci.yml"],
+          "handoffSpec": {
+            "objective": "Documentación y helpers verificados contra la entrega real.",
+            "steps": [
+              "Auditar README/xtask: `cargo xtask build` está anunciado — verificar que xtask lo implementa (revisar crates/xtask/src/main.rs); si no, implementarlo (cargo build --release + copia de binarios) o quitar la mención.",
+              "Revisar plan/migration-rust.json: mantener como referencia histórica, agregar header 'superseded por plan/backlog-engine-cli-tauri.json (M0-M2 done)'.",
+              "PROGRESS.md: sección final de cierre con todas las adjudicaciones vigentes y el estado de las 20 historias.",
+              "CI: verificar jobs fmt/clippy/test/cli-matrix/release; agregar desktop job si GX-018 lo definió.",
+              "Borrar remote.txt (arquetipo heredado) o moverlo a docs/."
+            ],
+            "verification": "recorrer cada comando documentado en README ejecutándolo desde un checkout limpio; cualquier comando que falle se implementa o se marca como futuro."
+          },
+          "agentActions": [
+            "Replace stale claims about completed modules, egui, and cargo xtask build with verified instructions.",
+            "Either implement xtask build/release commands or remove their advertised usage.",
+            "Keep the historical migration plan as reference while marking this backlog as the active execution order."
+          ],
+          "acceptanceCriteria": [
+            "Every documented command succeeds from a clean checkout or is explicitly marked future work.",
+            "CI verifies the CLI and desktop deliverables appropriate to their milestone."
+          ]
+        }
+      ]
+    }
+  ],
+  "gates": [
+    {
+      "id": "GATE-BASELINE",
+      "after": ["GX-001", "GX-002"],
+      "requirements": [
+        "A committed source fixture and golden diagnostics can be compared without Python at test time.",
+        "Regression tests expose the known state-reset and dispatch failures."
+      ]
+    },
+    {
+      "id": "GATE-ENGINE",
+      "after": ["GX-003", "GX-004", "GX-005", "GX-006", "GX-007", "GX-008"],
+      "requirements": [
+        "The public engine scans supported inputs with correct per-object source locations and deterministic findings.",
+        "All concrete rules have behavioral coverage; representative legacy exports have adjudicated expected results.",
+        "Unsupported or corrupt input fails visibly."
+      ]
+    },
+    {
+      "id": "GATE-CLI",
+      "after": ["GX-009", "GX-010", "GX-011", "GX-012", "GX-013", "GX-014"],
+      "requirements": [
+        "A fresh checkout builds gx and runs the golden and legacy acceptance corpus without the Python sibling repository.",
+        "gx scans files and directories, returns real diagnostics, JSON/text output, stable exit codes, and a tested quality-gate verdict.",
+        "Fresh database initialization and user-config preservation are verified; failed inputs never appear clean.",
+        "cargo fmt --all -- --check, cargo clippy --workspace --all-targets -- -D warnings, cargo test --workspace, and a release build pass."
+      ]
+    },
+    {
+      "id": "GATE-DESKTOP",
+      "after": ["GX-015", "GX-016", "GX-017", "GX-018"],
+      "requirements": [
+        "The installed Tauri 2 application uses the same Rust engine and configuration as gx.",
+        "Vue renders source-aware diagnostics, progress, errors, rule settings, and history without blocking.",
+        "A clean build and upgrade preserve user data and pass the desktop acceptance workflow."
+      ]
+    }
+  ]
+}

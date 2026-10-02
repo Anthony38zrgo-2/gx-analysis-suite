@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 gx_core = { path = "../gx_core" }
+gx_rules = { path = "../gx_rules" }
 regex = { workspace = true }
 rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 rusqlite_migration = "1.1"

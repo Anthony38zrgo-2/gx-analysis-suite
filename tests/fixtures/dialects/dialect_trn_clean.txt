@@ -1,0 +1,17 @@
+rules:
+// CODIGO INICIATIVA: INIT-33
+// DESCRIPCION: transacción con parm y recorrido validado
+// RESPONSIBLE: qa
+// VERSION: 1.0.0
+
+parm(in:&ClientId, out:&ClientName)
+
+events:
+    // Valida el cliente en la transacción
+    &Count = nullvalue(0)
+    for each Customer
+        where CustomerId = &ClientId
+        defined by CustomerIdx
+        &Count = &Count + 1
+    endfor // Customer
+    msg(&Count)

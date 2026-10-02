@@ -12,7 +12,7 @@ define_rule! {
     severity = Severity::Warning,
     description = "Usar Mayúsculas y Minúsculas en uso de variables, variable empieza con &.",
     triggers = ["&"],
-    abstract = false,
+    abstract = false, route = tokens,
     struct RuleGx1_1 {},
     reset = |me: &mut RuleGx1_1, _file: &Path| {  },
     evaluate = |me: &mut RuleGx1_1, line: &ParsedLine, ctx: &AuditContext| {
@@ -27,7 +27,9 @@ define_rule! {
         if matches.is_empty() {
             return vec![];
         }
-        let vars: Vec<String> = matches.iter().map(|v| format!("&{v}")).collect();
+        // Orden determinista del texto del diagnóstico (GX-005).
+        let mut vars: Vec<String> = matches.iter().map(|v| format!("&{v}")).collect();
+        vars.sort();
         let vars_str = vars.join(", ");
         vec![make_issue(
             me.id(),
