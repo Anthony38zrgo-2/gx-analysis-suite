@@ -22,12 +22,14 @@
 //! y nunca se lintea como XML de marca.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{bail, Result};
-use regex::Regex;
-use std::sync::LazyLock;
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader;
 
-use crate::models::{ObjectRef, SourceObject};
+use crate::budget::ExecutionBudget;
+use crate::models::{ObjectRef, SourceObject, SourceSegment};
 
 /// Máximo de miembros por paquete (protección contra paquetes anómalos).
 pub const MAX_XPZ_MEMBERS: usize = 4096;
@@ -36,38 +38,81 @@ pub const MAX_MEMBER_BYTES: usize = 32 * 1024 * 1024;
 /// Máximo de bytes descomprimidos totales por artefacto.
 pub const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 
-/// Matches `<Events><![CDATA[ ... ]]></Events>` (DOTALL + IGNORECASE).
-pub static EVENTS_CDATA_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<Events>\s*<!\[CDATA\[(.*?)]]>\s*</Events>").unwrap());
+/// Contenedores XML que NUNCA aportan código (A03): un `<Events>` dentro de
+/// documentación/layout no puede convertirse en fuente ejecutable.
+const NON_CODE_CONTAINERS: &[&str] = &["documentation", "layout", "help", "structure"];
 
-/// Bloque `<GXObject>…</GXObject>` del formato real de export.
-static GXOBJECT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<GXObject\b[^>]*>\s*(.*?)\s*</GXObject>").unwrap());
+/// Secciones de CÓDIGO reconocidas dentro de un objeto.
+const CODE_SECTIONS: &[&str] = &["events", "rules", "subroutines"];
 
-/// Primer tag dentro del bloque GXObject: el tipo de objeto.
-static GXOBJECT_TYPE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)^\s*<([A-Za-z][A-Za-z0-9_]*)").unwrap());
+/// Resultado de una extracción con presupuesto (A04/F07).
+#[derive(Debug, Clone)]
+pub struct ExtractionOutcome {
+    /// Objetos completos extraídos (los parciales se conservan).
+    pub objects: Vec<SourceObject>,
+    /// Motivo del corte por presupuesto; la corrida es `partial`.
+    pub limit: Option<String>,
+    /// Cancelación solicitada: los objetos ya extraídos se conservan.
+    pub cancelled: bool,
+}
 
-/// Bloque `<Info>…</Info>` (nombre/folder del objeto).
-static INFO_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<Info>(.*?)</Info>").unwrap());
-static INFO_NAME_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<Name>\s*([^<]*?)\s*</Name>").unwrap());
-static INFO_FOLDER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<Folder>\s*([^<]*?)\s*</Folder>").unwrap());
+impl ExtractionOutcome {
+    fn complete(objects: Vec<SourceObject>) -> Self {
+        Self {
+            objects,
+            limit: None,
+            cancelled: false,
+        }
+    }
+}
 
-/// Secciones de CÓDIGO dentro de un objeto, en orden documental.
-static CODE_SECTION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?is)<(Events|Rules|Subroutines)>\s*<!\[CDATA\[(.*?)]]>").unwrap()
-});
+fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false)
+}
 
-/// Primer tag del XML del miembro: tipo de objeto + atributos (layout legacy).
-static ROOT_TAG_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)<([A-Za-z][A-Za-z0-9_]*)\b([^>]*)>").unwrap());
-
-/// Extrae los objetos fuente de un artefacto GeneXus (GX-006).
+/// Extrae los objetos fuente de un artefacto GeneXus (GX-006) con el
+/// presupuesto por defecto.
 pub fn extract_source_objects(file_path: &Path) -> Result<Vec<SourceObject>> {
+    let budget = ExecutionBudget::default();
+    Ok(extract_source_objects_with_budget(file_path, &budget, None)?.objects)
+}
+
+/// Extrae con presupuesto explícito y token de cancelación (A04).
+///
+/// Un límite alcanzado NO es un error de formato: devuelve los objetos ya
+/// extraídos con `limit`/`cancelled`, y el runtime lo convierte en un
+/// resultado `partial`/`cancelled` (nunca PASS).
+pub fn extract_source_objects_with_budget(
+    file_path: &Path,
+    budget: &ExecutionBudget,
+    cancel: Option<&AtomicBool>,
+) -> Result<ExtractionOutcome> {
     if !file_path.is_file() {
         bail!("El archivo no existe: {}", file_path.display());
+    }
+    // F07: la lectura también se acota para texto/XML/paquetes, no sólo por
+    // headers de archivo.
+    let input_len = std::fs::metadata(file_path)
+        .map(|m| m.len())
+        .unwrap_or(u64::MAX);
+    if input_len > budget.max_input_bytes {
+        return Ok(ExtractionOutcome {
+            objects: Vec::new(),
+            limit: Some(format!(
+                "el archivo '{}' supera el máximo de entrada ({} > {} bytes)",
+                file_path.display(),
+                input_len,
+                budget.max_input_bytes
+            )),
+            cancelled: false,
+        });
+    }
+    if is_cancelled(cancel) {
+        return Ok(ExtractionOutcome {
+            objects: Vec::new(),
+            limit: None,
+            cancelled: true,
+        });
     }
     let ext = file_path
         .extension()
@@ -80,13 +125,13 @@ pub fn extract_source_objects(file_path: &Path) -> Result<Vec<SourceObject>> {
         "xpz" | "zip" | "rar" => {
             let head = archive_magic(file_path)?;
             if is_rar_magic(&head) {
-                objects_from_rar(file_path)
+                objects_from_rar(file_path, budget, cancel)
             } else {
-                objects_from_zip(file_path)
+                objects_from_zip(file_path, budget, cancel)
             }
         }
-        "xml" => objects_from_xml(file_path),
-        "txt" | "prg" | "gxd" | "src" => objects_from_text(file_path),
+        "xml" => objects_from_xml(file_path, budget, cancel),
+        "txt" | "prg" | "gxd" | "src" => objects_from_text(file_path, budget, cancel),
         _ => bail!(
             "Formato no soportado '{}': se esperaban fuentes .xpz, .zip, .rar, .xml, \
              .txt, .prg, .gxd o .src",
@@ -168,7 +213,18 @@ pub fn list_package_members(package_path: &Path) -> Result<Vec<String>> {
 // Texto plano
 // ─────────────────────────────────────────────────────────────────────────
 
-fn objects_from_text(file_path: &Path) -> Result<Vec<SourceObject>> {
+fn objects_from_text(
+    file_path: &Path,
+    budget: &ExecutionBudget,
+    cancel: Option<&AtomicBool>,
+) -> Result<ExtractionOutcome> {
+    if is_cancelled(cancel) {
+        return Ok(ExtractionOutcome {
+            objects: Vec::new(),
+            limit: None,
+            cancelled: true,
+        });
+    }
     let bytes = std::fs::read(file_path)?;
     let text = decode_bytes(&bytes).ok_or_else(|| {
         anyhow::anyhow!(
@@ -179,9 +235,16 @@ fn objects_from_text(file_path: &Path) -> Result<Vec<SourceObject>> {
     if text.trim().is_empty() {
         bail!("El archivo fuente '{}' está vacío.", file_path.display());
     }
+    if budget.max_objects == 0 {
+        return Ok(ExtractionOutcome {
+            objects: Vec::new(),
+            limit: Some("presupuesto de objetos agotado (max_objects=0)".to_string()),
+            cancelled: false,
+        });
+    }
     let name = file_name_lossy(file_path);
     let id = file_stem_lossy(file_path).unwrap_or_else(|| name.clone());
-    Ok(vec![SourceObject {
+    Ok(ExtractionOutcome::complete(vec![SourceObject {
         object: ObjectRef {
             id,
             object_type: "Source".to_string(),
@@ -191,14 +254,26 @@ fn objects_from_text(file_path: &Path) -> Result<Vec<SourceObject>> {
         },
         text,
         code_start_line: 1,
-    }])
+        segments: Vec::new(),
+    }]))
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // XML
 // ─────────────────────────────────────────────────────────────────────────
 
-fn objects_from_xml(xml_path: &Path) -> Result<Vec<SourceObject>> {
+fn objects_from_xml(
+    xml_path: &Path,
+    budget: &ExecutionBudget,
+    cancel: Option<&AtomicBool>,
+) -> Result<ExtractionOutcome> {
+    if is_cancelled(cancel) {
+        return Ok(ExtractionOutcome {
+            objects: Vec::new(),
+            limit: None,
+            cancelled: true,
+        });
+    }
     let bytes = std::fs::read(xml_path)?;
     let xml_text = decode_bytes(&bytes).ok_or_else(|| {
         anyhow::anyhow!(
@@ -212,8 +287,23 @@ fn objects_from_xml(xml_path: &Path) -> Result<Vec<SourceObject>> {
 
     let name = file_name_lossy(xml_path);
     let container = xml_path.to_string_lossy().to_string();
-    let extracted = extract_from_xml_text(&xml_text, &container, &name);
+    let extracted = extract_from_xml_text(&xml_text, &container, &name, cancel)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    if let Some(limit) = object_limit(budget, extracted.objects.len(), &container) {
+        return Ok(ExtractionOutcome {
+            objects: extracted.objects,
+            limit: Some(limit),
+            cancelled: extracted.cancelled,
+        });
+    }
+    if extracted.cancelled {
+        return Ok(ExtractionOutcome {
+            objects: extracted.objects,
+            limit: None,
+            cancelled: true,
+        });
+    }
     if extracted.objects.is_empty() {
         if extracted.gx_objects == 0 {
             bail!(
@@ -224,56 +314,97 @@ fn objects_from_xml(xml_path: &Path) -> Result<Vec<SourceObject>> {
         }
         warn_no_code(&xml_path.display().to_string(), extracted.gx_objects);
     }
-    Ok(extracted.objects)
+    Ok(ExtractionOutcome::complete(extracted.objects))
+}
+
+/// Motivo de corte si `count` excede `max_objects` (A04).
+fn object_limit(budget: &ExecutionBudget, count: usize, container: &str) -> Option<String> {
+    if count > budget.max_objects {
+        Some(format!(
+            "'{container}' supera el máximo de objetos extraídos ({count} > {})",
+            budget.max_objects
+        ))
+    } else {
+        None
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // Paquete ZIP
 // ─────────────────────────────────────────────────────────────────────────
 
-fn objects_from_zip(xpz_path: &Path) -> Result<Vec<SourceObject>> {
+fn objects_from_zip(
+    xpz_path: &Path,
+    budget: &ExecutionBudget,
+    cancel: Option<&AtomicBool>,
+) -> Result<ExtractionOutcome> {
     let file = std::fs::File::open(xpz_path)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| anyhow::anyhow!("ZIP inválido '{}': {e}", xpz_path.display()))?;
     if archive.is_empty() {
         bail!("El archivo '{}' está vacío.", xpz_path.display());
     }
-    if archive.len() > MAX_XPZ_MEMBERS {
-        bail!(
-            "El archivo '{}' supera el máximo de miembros permitidos ({}).",
-            xpz_path.display(),
-            MAX_XPZ_MEMBERS
-        );
-    }
 
     let container = xpz_path.to_string_lossy().to_string();
     let mut objects: Vec<SourceObject> = Vec::new();
     let mut gx_objects: usize = 0;
-    let mut total_bytes: usize = 0;
+    let mut total_bytes: u64 = 0;
+    let stop = |objects: Vec<SourceObject>, reason: String| ExtractionOutcome {
+        objects,
+        limit: Some(reason),
+        cancelled: false,
+    };
+
+    if archive.len() > budget.max_members {
+        return Ok(stop(
+            objects,
+            format!(
+                "el archivo '{}' supera el máximo de miembros ({} > {})",
+                xpz_path.display(),
+                archive.len(),
+                budget.max_members
+            ),
+        ));
+    }
 
     for i in 0..archive.len() {
+        if is_cancelled(cancel) {
+            return Ok(ExtractionOutcome {
+                objects,
+                limit: None,
+                cancelled: true,
+            });
+        }
         let mut member = archive.by_index(i)?;
         let member_name = member.name().replace('\\', "/");
         if member_name.ends_with('/') {
             continue;
         }
-        let member_size = member.size() as usize;
-        if member_size > MAX_MEMBER_BYTES {
-            bail!(
-                "El miembro '{member_name}' de '{}' supera el tamaño máximo permitido ({} bytes).",
-                xpz_path.display(),
-                MAX_MEMBER_BYTES
-            );
+        let member_size = member.size();
+        if member_size > budget.max_member_bytes {
+            return Ok(stop(
+                objects,
+                format!(
+                    "el miembro '{member_name}' de '{}' supera el máximo por miembro ({} > {} bytes)",
+                    xpz_path.display(),
+                    member_size,
+                    budget.max_member_bytes
+                ),
+            ));
         }
         total_bytes += member_size;
-        if total_bytes > MAX_TOTAL_BYTES {
-            bail!(
-                "El archivo '{}' supera el tamaño descomprimido máximo permitido ({} bytes).",
-                xpz_path.display(),
-                MAX_TOTAL_BYTES
-            );
+        if total_bytes > budget.max_expanded_bytes {
+            return Ok(stop(
+                objects,
+                format!(
+                    "el archivo '{}' supera el máximo descomprimido ({} > {} bytes)",
+                    xpz_path.display(),
+                    total_bytes,
+                    budget.max_expanded_bytes
+                ),
+            ));
         }
-        let mut raw = Vec::with_capacity(member_size.min(8 * 1024 * 1024));
+        let mut raw = Vec::with_capacity((member_size as usize).min(8 * 1024 * 1024));
         use std::io::Read;
         member
             .read_to_end(&mut raw)
@@ -291,9 +422,20 @@ fn objects_from_zip(xpz_path: &Path) -> Result<Vec<SourceObject>> {
             continue;
         }
 
-        let extracted = extract_from_xml_text(&xml_text, &container, &member_name);
+        let extracted = extract_from_xml_text(&xml_text, &container, &member_name, cancel)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         gx_objects += extracted.gx_objects;
         objects.extend(extracted.objects);
+        if extracted.cancelled {
+            return Ok(ExtractionOutcome {
+                objects,
+                limit: None,
+                cancelled: true,
+            });
+        }
+        if let Some(limit) = object_limit(budget, objects.len(), &container) {
+            return Ok(stop(objects, limit));
+        }
     }
 
     if objects.is_empty() {
@@ -307,14 +449,18 @@ fn objects_from_zip(xpz_path: &Path) -> Result<Vec<SourceObject>> {
         }
         warn_no_code(&xpz_path.display().to_string(), gx_objects);
     }
-    Ok(objects)
+    Ok(ExtractionOutcome::complete(objects))
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // Paquete RAR (GeneXus con WinRAR)
 // ─────────────────────────────────────────────────────────────────────────
 
-fn objects_from_rar(xpz_path: &Path) -> Result<Vec<SourceObject>> {
+fn objects_from_rar(
+    xpz_path: &Path,
+    budget: &ExecutionBudget,
+    cancel: Option<&AtomicBool>,
+) -> Result<ExtractionOutcome> {
     let container = xpz_path.to_string_lossy().to_string();
     let mut objects: Vec<SourceObject> = Vec::new();
     let mut gx_objects: usize = 0;
@@ -324,11 +470,20 @@ fn objects_from_rar(xpz_path: &Path) -> Result<Vec<SourceObject>> {
         .map_err(|e| anyhow::anyhow!("RAR inválido '{}': {e}", xpz_path.display()))?;
 
     let mut member_seen = 0usize;
-    let mut total_bytes: usize = 0;
+    let mut total_bytes: u64 = 0;
     while let Some(state) = archive
         .read_header()
         .map_err(|e| anyhow::anyhow!("Miembro RAR ilegible de '{}': {e}", xpz_path.display()))?
     {
+        // Nota A04: unrar es una operación nativa no interrumpible; el
+        // checkpoint se evalúa entre miembros, no dentro de `read()`.
+        if is_cancelled(cancel) {
+            return Ok(ExtractionOutcome {
+                objects,
+                limit: None,
+                cancelled: true,
+            });
+        }
         let member_name = state.entry().filename.to_string_lossy().replace('\\', "/");
         if member_name.ends_with('/') {
             archive = state.skip().map_err(|e| {
@@ -337,28 +492,43 @@ fn objects_from_rar(xpz_path: &Path) -> Result<Vec<SourceObject>> {
             continue;
         }
         member_seen += 1;
-        if member_seen > MAX_XPZ_MEMBERS {
-            bail!(
-                "El archivo '{}' supera el máximo de miembros permitidos ({}).",
-                xpz_path.display(),
-                MAX_XPZ_MEMBERS
-            );
+        if member_seen > budget.max_members {
+            return Ok(ExtractionOutcome {
+                objects,
+                limit: Some(format!(
+                    "el archivo '{}' supera el máximo de miembros ({} > {})",
+                    xpz_path.display(),
+                    member_seen,
+                    budget.max_members
+                )),
+                cancelled: false,
+            });
         }
         let size = state.entry().unpacked_size;
-        if size > MAX_MEMBER_BYTES as u64 {
-            bail!(
-                "El miembro '{member_name}' de '{}' supera el tamaño máximo permitido ({} bytes).",
-                xpz_path.display(),
-                MAX_MEMBER_BYTES
-            );
+        if size > budget.max_member_bytes {
+            return Ok(ExtractionOutcome {
+                objects,
+                limit: Some(format!(
+                    "el miembro '{member_name}' de '{}' supera el máximo por miembro ({} > {} bytes)",
+                    xpz_path.display(),
+                    size,
+                    budget.max_member_bytes
+                )),
+                cancelled: false,
+            });
         }
-        total_bytes += size as usize;
-        if total_bytes > MAX_TOTAL_BYTES {
-            bail!(
-                "El archivo '{}' supera el tamaño descomprimido máximo permitido ({} bytes).",
-                xpz_path.display(),
-                MAX_TOTAL_BYTES
-            );
+        total_bytes += size;
+        if total_bytes > budget.max_expanded_bytes {
+            return Ok(ExtractionOutcome {
+                objects,
+                limit: Some(format!(
+                    "el archivo '{}' supera el máximo descomprimido ({} > {} bytes)",
+                    xpz_path.display(),
+                    total_bytes,
+                    budget.max_expanded_bytes
+                )),
+                cancelled: false,
+            });
         }
 
         let (raw, rest) = state
@@ -379,9 +549,24 @@ fn objects_from_rar(xpz_path: &Path) -> Result<Vec<SourceObject>> {
             continue;
         }
 
-        let extracted = extract_from_xml_text(&xml_text, &container, &member_name);
+        let extracted = extract_from_xml_text(&xml_text, &container, &member_name, cancel)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         gx_objects += extracted.gx_objects;
         objects.extend(extracted.objects);
+        if extracted.cancelled {
+            return Ok(ExtractionOutcome {
+                objects,
+                limit: None,
+                cancelled: true,
+            });
+        }
+        if let Some(limit) = object_limit(budget, objects.len(), &container) {
+            return Ok(ExtractionOutcome {
+                objects,
+                limit: Some(limit),
+                cancelled: false,
+            });
+        }
     }
 
     if objects.is_empty() {
@@ -395,7 +580,7 @@ fn objects_from_rar(xpz_path: &Path) -> Result<Vec<SourceObject>> {
         }
         warn_no_code(&xpz_path.display().to_string(), gx_objects);
     }
-    Ok(objects)
+    Ok(ExtractionOutcome::complete(objects))
 }
 
 fn warn_no_code(container: &str, gx_objects: usize) {
@@ -413,183 +598,368 @@ struct Extracted {
     objects: Vec<SourceObject>,
     /// Cantidad de bloques `<GXObject>` reconocidos en el texto.
     gx_objects: usize,
+    /// El parseo se detuvo porque se solicitó cancelación (A04).
+    cancelled: bool,
 }
 
-/// Extrae objetos de un texto XML: primero formato real (`GXObject`), y si
-/// no hay ninguno, layout legacy con `<Events>` directos.
-fn extract_from_xml_text(xml_text: &str, container: &str, member: &str) -> Extracted {
-    let mut objects: Vec<SourceObject> = Vec::new();
-    let mut gx_objects: usize = 0;
-
-    for caps in GXOBJECT_RE.captures_iter(xml_text) {
-        gx_objects += 1;
-        let block = match caps.get(1) {
-            Some(m) => m,
-            None => continue,
-        };
-        let block_text = block.as_str();
-        let block_offset = block.start();
-
-        let object_type = GXOBJECT_TYPE_RE
-            .captures(block_text)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str().to_string())
-            .unwrap_or_else(|| "Source".to_string());
-
-        let info = INFO_RE.captures(block_text).and_then(|c| c.get(1));
-        let info_text = info.as_ref().map(|m| m.as_str()).unwrap_or("");
-        let name = INFO_NAME_RE
-            .captures(info_text)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str().trim().to_string())
-            .unwrap_or_default();
-        let package = INFO_FOLDER_RE
-            .captures(info_text)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str().trim().to_string())
-            .unwrap_or_default();
-
-        let sections = code_sections(xml_text, block_offset, block_text);
-        if sections.is_empty() {
-            continue;
-        }
-        let code_start_line = sections.first().map(|s| s.2).unwrap_or(1);
-        let text = sections
-            .iter()
-            .map(|s| s.1.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        objects.push(SourceObject {
-            object: ObjectRef {
-                id: if name.is_empty() {
-                    member_stem(member)
-                } else {
-                    name
-                },
-                object_type,
-                container_path: container.to_string(),
-                member: member.to_string(),
-                package,
-            },
-            text,
-            code_start_line,
-        });
-    }
-
-    if gx_objects == 0 {
-        // Layout legacy (fixtures sintéticos / exports antiguos): `<Events>`
-        // directos con identidad desde los atributos del root.
-        objects.extend(legacy_events_objects(xml_text, container, member));
-    }
-
-    Extracted {
-        objects,
-        gx_objects,
-    }
-}
-
-/// Secciones de código de un objeto: `(kind, texto, línea en el miembro)`.
-///
-/// `code_start_line` apunta a la línea del miembro donde COMIENZA el texto
-/// extraído (la línea del `<!\[CDATA\[`), de modo que
-/// `member_line = code_start_line + text_line - 1` (GX-006/GX-017).
-fn code_sections(
-    xml_text: &str,
-    block_offset: usize,
-    block_text: &str,
-) -> Vec<(String, String, u32)> {
-    let mut sections = Vec::new();
-    for caps in CODE_SECTION_RE.captures_iter(block_text) {
-        let kind = caps
-            .get(1)
-            .map(|m| m.as_str().to_string())
-            .unwrap_or_default();
-        let cdata = match caps.get(2) {
-            Some(m) => m.as_str(),
-            None => continue,
-        };
-        if cdata.trim().is_empty() {
-            continue;
-        }
-        let cdata_start = block_offset + caps.get(2).map(|m| m.start()).unwrap_or(0);
-        let line = xml_text[..cdata_start.min(xml_text.len())]
-            .matches('\n')
-            .count() as u32
-            + 1;
-        sections.push((kind, cdata.to_string(), line));
-    }
-    sections
-}
-
-/// Layout legacy: un objeto por `<Events><![CDATA[...]]>` con identidad del
-/// root (atributos `name`/`package`) o del stem del miembro.
-fn legacy_events_objects(xml_text: &str, container: &str, member: &str) -> Vec<SourceObject> {
-    let root = root_info(xml_text);
-    let mut objects = Vec::new();
-    for caps in EVENTS_CDATA_RE.captures_iter(xml_text) {
-        let cdata = match caps.get(1) {
-            Some(m) => m.as_str(),
-            None => continue,
-        };
-        if cdata.trim().is_empty() {
-            continue;
-        }
-        let cdata_start = caps
-            .get(1)
-            .map(|m| m.start())
-            .unwrap_or_else(|| caps.get(0).map(|m| m.start()).unwrap_or(0));
-        let code_start_line = xml_text[..cdata_start].matches('\n').count() as u32 + 1;
-        let id = if root.name.is_empty() {
-            member_stem(member)
-        } else {
-            root.name.clone()
-        };
-        objects.push(SourceObject {
-            object: ObjectRef {
-                id,
-                object_type: root.kind.clone(),
-                container_path: container.to_string(),
-                member: member.to_string(),
-                package: root.package.clone(),
-            },
-            text: cdata.to_string(),
-            code_start_line,
-        });
-    }
-    objects
-}
-
-struct RootInfo {
+/// Sección de código cruda con su línea física en el miembro.
+#[derive(Debug, Clone)]
+struct Section {
     kind: String,
+    text: String,
+    /// Línea (1-based) del miembro donde comienza el contenido del CDATA.
+    member_start_line: u32,
+}
+
+/// Estado de un `<GXObject>` en construcción.
+#[derive(Default)]
+struct ObjectBuilder {
+    object_type: Option<String>,
+    info_depth: usize,
     name: String,
     package: String,
+    sections: Vec<Section>,
 }
 
-fn root_info(xml_text: &str) -> RootInfo {
-    let (kind, attrs) = ROOT_TAG_RE
-        .captures(xml_text)
-        .map(|c| {
-            (
-                c.get(1).map(|m| m.as_str().to_string()),
-                c.get(2).map(|m| m.as_str().to_string()),
-            )
-        })
-        .unwrap_or((None, None));
-    let attrs = attrs.unwrap_or_default();
-    let attr = |key: &str| -> String {
-        Regex::new(&format!(r#"(?i)\b{key}\s*=\s*"([^"]*)""#))
-            .ok()
-            .and_then(|re| re.captures(&attrs))
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str().to_string())
-            .unwrap_or_default()
-    };
-    RootInfo {
-        kind: kind.unwrap_or_else(|| "Source".to_string()),
-        name: attr("name"),
-        package: attr("package"),
+/// Sección de código en construcción.
+struct SectionBuilder {
+    kind: String,
+    cdata: String,
+    member_start_line: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Capture {
+    Name,
+    Folder,
+}
+
+/// Índice de inicios de línea: offset de byte → línea 1-based en O(log n).
+struct LineIndex {
+    starts: Vec<usize>,
+}
+
+impl LineIndex {
+    fn new(text: &str) -> Self {
+        let mut starts = vec![0usize];
+        for (i, b) in text.bytes().enumerate() {
+            if b == b'\n' {
+                starts.push(i + 1);
+            }
+        }
+        LineIndex { starts }
     }
+
+    fn line_of(&self, offset: usize) -> u32 {
+        self.starts.partition_point(|&s| s <= offset).max(1) as u32
+    }
+}
+
+/// Extrae objetos de un texto XML con un parser de eventos (A03/F04).
+///
+/// - Formato real: cada `<GXObject>` aporta identidad y secciones de código
+///   (`Events`/`Rules`/`Subroutines`) con contexto de anidamiento explícito.
+/// - Layout legacy: si no hay ningún `<GXObject>`, las secciones de código
+///   se agrupan en un objeto con identidad del elemento raíz.
+/// - XML de documentación con apariencia de código no es ejecutable: sólo
+///   se capturan CDATA de secciones de código fuera de contenedores no-código.
+/// - XML malformado se rechaza explícitamente (nunca se lintea a medias).
+fn extract_from_xml_text(
+    xml_text: &str,
+    container: &str,
+    member: &str,
+    cancel: Option<&AtomicBool>,
+) -> Result<Extracted, String> {
+    crate::stats::count_parser_invocation();
+    let lines = LineIndex::new(xml_text);
+    let mut reader = Reader::from_str(xml_text);
+    let mut events: usize = 0;
+
+    let mut stack: Vec<String> = Vec::new();
+    let mut objects: Vec<SourceObject> = Vec::new();
+    let mut current: Option<ObjectBuilder> = None;
+    let mut gx_objects: usize = 0;
+    let mut legacy_sections: Vec<Section> = Vec::new();
+    let mut legacy_root: Option<(String, String, String)> = None;
+    let mut noncode_depth: Option<usize> = None;
+    let mut section: Option<SectionBuilder> = None;
+    let mut capture: Option<Capture> = None;
+    let mut capture_buf = String::new();
+
+    loop {
+        // Checkpoint de cancelación cada 1024 eventos (A04).
+        if events.is_multiple_of(1024) && is_cancelled(cancel) {
+            return Ok(Extracted {
+                objects,
+                gx_objects,
+                cancelled: true,
+            });
+        }
+        events += 1;
+        let event = match reader.read_event() {
+            Ok(Event::Eof) => break,
+            Ok(ev) => ev,
+            Err(e) => {
+                return Err(format!(
+                    "XML inválido en '{}' (miembro '{member}'): {e}",
+                    container
+                ))
+            }
+        };
+
+        match event {
+            Event::Start(e) => {
+                let name = decode_name_bytes(e.name().as_ref());
+                let lname = name.to_ascii_lowercase();
+
+                if lname == "gxobject" {
+                    gx_objects += 1;
+                    current = Some(ObjectBuilder::default());
+                    noncode_depth = None;
+                    section = None;
+                    stack.push(lname);
+                    continue;
+                }
+
+                let parent_is_root = stack.is_empty();
+                let parent_is_gxobject = stack.last().map(|s| s == "gxobject").unwrap_or(false);
+                let inside_object = current.is_some();
+
+                if parent_is_root && legacy_root.is_none() {
+                    let (n, p) = element_name_package(&e);
+                    legacy_root = Some((name.clone(), n, p));
+                }
+
+                if noncode_depth.is_none() && NON_CODE_CONTAINERS.contains(&lname.as_str()) {
+                    stack.push(lname);
+                    noncode_depth = Some(stack.len());
+                    continue;
+                }
+                let in_noncode = noncode_depth.is_some();
+
+                if inside_object && parent_is_gxobject {
+                    let builder = current.as_mut().expect("current verificado");
+                    if builder.object_type.is_none() {
+                        builder.object_type = Some(name.clone());
+                    }
+                }
+
+                if inside_object && !in_noncode && lname == "info" {
+                    current.as_mut().expect("current verificado").info_depth += 1;
+                } else if inside_object
+                    && !in_noncode
+                    && capture.is_none()
+                    && current.as_ref().map(|b| b.info_depth > 0).unwrap_or(false)
+                {
+                    if lname == "name" {
+                        capture = Some(Capture::Name);
+                        capture_buf.clear();
+                    } else if lname == "folder" {
+                        capture = Some(Capture::Folder);
+                        capture_buf.clear();
+                    }
+                }
+
+                if !in_noncode
+                    && section.is_none()
+                    && CODE_SECTIONS.contains(&lname.as_str())
+                    && (inside_object || current.is_none())
+                {
+                    section = Some(SectionBuilder {
+                        kind: name.clone(),
+                        cdata: String::new(),
+                        member_start_line: 0,
+                    });
+                }
+
+                stack.push(lname);
+            }
+            Event::Empty(e) => {
+                let empty_name = decode_name_bytes(e.name().as_ref());
+                if let Some(builder) = current.as_mut() {
+                    if builder.object_type.is_none()
+                        && stack.last().map(|s| s == "gxobject").unwrap_or(false)
+                    {
+                        builder.object_type = Some(empty_name);
+                    }
+                }
+            }
+            Event::End(e) => {
+                let name = decode_name_bytes(e.name().as_ref());
+                let lname = name.to_ascii_lowercase();
+
+                if let Some(sec) = section.as_ref() {
+                    if sec.kind.to_ascii_lowercase() == lname {
+                        let sec = section.take().expect("section verificada");
+                        if !sec.cdata.trim().is_empty() {
+                            let target = Section {
+                                kind: sec.kind,
+                                text: sec.cdata,
+                                member_start_line: sec.member_start_line.max(1),
+                            };
+                            match current.as_mut() {
+                                Some(builder) => builder.sections.push(target),
+                                None => legacy_sections.push(target),
+                            }
+                        }
+                    }
+                }
+
+                if capture.is_some() {
+                    let is_match = match capture {
+                        Some(Capture::Name) => lname == "name",
+                        Some(Capture::Folder) => lname == "folder",
+                        None => false,
+                    };
+                    if is_match {
+                        let cap = capture.take().expect("capture verificada");
+                        let value = capture_buf.trim().to_string();
+                        if let Some(builder) = current.as_mut() {
+                            match cap {
+                                Capture::Name => builder.name = value,
+                                Capture::Folder => builder.package = value,
+                            }
+                        }
+                        capture_buf.clear();
+                    }
+                }
+
+                if lname == "info" {
+                    if let Some(builder) = current.as_mut() {
+                        builder.info_depth = builder.info_depth.saturating_sub(1);
+                    }
+                }
+
+                if lname == "gxobject" {
+                    if let Some(builder) = current.take() {
+                        if let Some(object) = build_source_object(builder, container, member) {
+                            objects.push(object);
+                        }
+                    }
+                    noncode_depth = None;
+                    section = None;
+                }
+
+                if stack.last().map(|s| s.as_str()) == Some(lname.as_str()) {
+                    stack.pop();
+                }
+                if let Some(depth) = noncode_depth {
+                    if stack.len() < depth {
+                        noncode_depth = None;
+                    }
+                }
+            }
+            Event::Text(e) if capture.is_some() => {
+                let text = e
+                    .unescape()
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| String::from_utf8_lossy(e.as_ref()).into_owned());
+                capture_buf.push_str(&text);
+            }
+            Event::CData(e) => {
+                if let Some(sec) = section.as_mut() {
+                    let content = String::from_utf8_lossy(e.as_ref()).into_owned();
+                    if sec.cdata.is_empty() {
+                        let end = reader.buffer_position();
+                        let start = end.saturating_sub(3 + content.len());
+                        sec.member_start_line = lines.line_of(start);
+                    }
+                    sec.cdata.push_str(&content);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if gx_objects == 0 && !legacy_sections.is_empty() {
+        let (kind, name, package) = legacy_root.unwrap_or_default();
+        let builder = ObjectBuilder {
+            object_type: Some(kind),
+            info_depth: 0,
+            name,
+            package,
+            sections: legacy_sections,
+        };
+        if let Some(object) = build_source_object(builder, container, member) {
+            objects.push(object);
+        }
+    }
+
+    Ok(Extracted {
+        objects,
+        gx_objects,
+        cancelled: false,
+    })
+}
+
+/// Construye el `SourceObject` concatenando secciones con `\n\n` y
+/// registrando el mapa de segmentos (A03/F04).
+fn build_source_object(
+    builder: ObjectBuilder,
+    container: &str,
+    member: &str,
+) -> Option<SourceObject> {
+    if builder.sections.is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    let mut segments: Vec<SourceSegment> = Vec::with_capacity(builder.sections.len());
+    let mut line: u32 = 1;
+    for (i, sec) in builder.sections.iter().enumerate() {
+        if i > 0 {
+            text.push_str("\n\n");
+            line += 2;
+        }
+        segments.push(SourceSegment {
+            kind: sec.kind.clone(),
+            text_start_line: line,
+            member_start_line: sec.member_start_line,
+        });
+        text.push_str(&sec.text);
+        line += sec.text.matches('\n').count() as u32;
+    }
+    let code_start_line = segments.first().map(|s| s.member_start_line).unwrap_or(1);
+    let object_type = builder.object_type.unwrap_or_else(|| "Source".to_string());
+    Some(SourceObject {
+        object: ObjectRef {
+            id: if builder.name.is_empty() {
+                member_stem(member)
+            } else {
+                builder.name
+            },
+            object_type,
+            container_path: container.to_string(),
+            member: member.to_string(),
+            package: builder.package,
+        },
+        text,
+        code_start_line,
+        segments,
+    })
+}
+
+/// Nombre de un elemento XML (case original).
+fn decode_name_bytes(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw).to_string()
+}
+
+/// Atributos `name`/`package` del elemento (layout legacy).
+fn element_name_package(e: &BytesStart) -> (String, String) {
+    let mut name = String::new();
+    let mut package = String::new();
+    for attr in e.attributes().flatten() {
+        let key = String::from_utf8_lossy(attr.key.as_ref()).to_ascii_lowercase();
+        let value = attr
+            .unescape_value()
+            .map(|v| v.into_owned())
+            .unwrap_or_else(|_| String::from_utf8_lossy(&attr.value).into_owned());
+        match key.as_str() {
+            "name" => name = value.trim().to_string(),
+            "package" => package = value.trim().to_string(),
+            _ => {}
+        }
+    }
+    (name, package)
 }
 
 fn file_name_lossy(path: &Path) -> String {
@@ -894,6 +1264,150 @@ EndSub
             6,
             "sub 'Inicializar' está en la línea 6 del miembro"
         );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// A03/F04: un objeto con dos secciones separadas mapea cada línea del
+    /// texto concatenado a la línea FÍSICA real del miembro.
+    #[test]
+    fn sections_segments_map_to_member_lines() {
+        let xml = "<ExportFile>\n\
+                   <GXObject>\n\
+                   <Procedure>\n\
+                   <Info><Name>P1</Name></Info>\n\
+                   <Events><![CDATA[\n\
+                   &a = 1\n\
+                   ]]></Events>\n\
+                   <Rules><![CDATA[Parm(&x)\n\
+                   ]]></Rules>\n\
+                   </Procedure>\n\
+                   </GXObject>\n\
+                   </ExportFile>\n";
+        let extracted = extract_from_xml_text(xml, "c", "m.xml", None).unwrap();
+        assert_eq!(extracted.objects.len(), 1);
+        let obj = &extracted.objects[0];
+        assert_eq!(obj.segments.len(), 2);
+        assert_eq!(obj.segments[0].kind, "Events");
+        assert_eq!(obj.segments[1].kind, "Rules");
+        assert_eq!(obj.segments[0].member_start_line, 5);
+        assert_eq!(obj.segments[1].member_start_line, 8);
+        assert_eq!(obj.segments[1].text_start_line, 5);
+        assert_eq!(obj.member_line(2), 6, "&a = 1 está en la línea 6");
+        assert_eq!(obj.member_line(5), 8, "Parm(&x) está en la línea 8");
+    }
+
+    /// A03: el CDATA de documentación con apariencia de código NO es fuente.
+    #[test]
+    fn documentation_cdata_cannot_become_code() {
+        let xml = "<ExportFile>\n\
+                   <GXObject><Procedure><Info><Name>P1</Name></Info>\n\
+                   <Documentation><Source><![CDATA[<Events>sub 'Malo'\n\
+                   &i = &i + 1\n\
+                   </Events>]]></Source></Documentation>\n\
+                   </Procedure></GXObject>\n\
+                   </ExportFile>\n";
+        let extracted = extract_from_xml_text(xml, "c", "m.xml", None).unwrap();
+        assert_eq!(extracted.gx_objects, 1, "el GXObject se reconoce");
+        assert!(
+            extracted.objects.is_empty(),
+            "documentación no aporta código: {:?}",
+            extracted.objects
+        );
+    }
+
+    /// A03: comentario de bloque dentro de un string no altera el texto.
+    #[test]
+    fn string_with_block_comment_marker_is_preserved() {
+        let xml = "<Root name=\"P\"><Events><![CDATA[\n\
+                   &x = '/* no es comentario */'\n\
+                   ]]></Events></Root>";
+        let extracted = extract_from_xml_text(xml, "c", "m.xml", None).unwrap();
+        assert!(extracted.objects[0].text.contains("/* no es comentario */"));
+    }
+
+    /// E01: XML mutado (truncado, insertado, reemplazado) nunca paniquea:
+    /// devuelve Ok con lo parseado o Err explícito.
+    #[test]
+    fn malformed_xml_never_panics_and_is_total() {
+        let base = real_export_xml();
+        assert!(
+            extract_from_xml_text(&base, "c", "m.xml", None).is_ok(),
+            "el XML base debe parsear"
+        );
+
+        let mut state: u64 = 0xDEAD_BEEF_CAFE_F00D;
+        let next = |state: &mut u64| -> u64 {
+            let mut x = *state;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            *state = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+
+        for _ in 0..1500 {
+            let mut bytes = base.clone().into_bytes();
+            if bytes.is_empty() {
+                continue;
+            }
+            let picks = next(&mut state);
+            let index = (picks as usize) % bytes.len();
+            match picks % 5 {
+                0 => bytes.truncate(index),
+                1 => {
+                    bytes.remove(index);
+                }
+                2 => bytes.insert(index, b"<>\"'&/"[((picks >> 8) as usize) % 6]),
+                3 => {
+                    let len = bytes.len();
+                    bytes[index] = bytes[(index + 1) % len];
+                }
+                _ => {
+                    let marker = b"</GXObject>";
+                    let at = index.min(bytes.len().saturating_sub(1));
+                    bytes.splice(at..at, marker.iter().copied());
+                }
+            }
+            let candidate = String::from_utf8_lossy(&bytes).into_owned();
+            // Totalidad: Ok o Err, jamás panic.
+            let _ = extract_from_xml_text(&candidate, "c", "m.xml", None);
+        }
+    }
+
+    /// E01/A04: límite de miembro en ZIP devuelve `partial` (no error).
+    #[test]
+    fn zip_member_limit_is_partial() {
+        let p = tmp("gx_zip_limit.zip");
+        {
+            let file = std::fs::File::create(&p).unwrap();
+            let mut zw = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            use std::io::Write;
+            zw.start_file("KB/KB_1.xml", opts).unwrap();
+            zw.write_all(real_export_xml().as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        let budget = ExecutionBudget {
+            max_member_bytes: 16,
+            ..Default::default()
+        };
+        let outcome = extract_source_objects_with_budget(&p, &budget, None).unwrap();
+        assert!(outcome.limit.is_some(), "debe cortar por presupuesto");
+        assert!(outcome.objects.is_empty());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// E01/A04: token de cancelación pre-seteado detiene la extracción.
+    #[test]
+    fn cancelled_extraction_reports_cancelled() {
+        let p = tmp("gx_cancel_xml.xml");
+        std::fs::write(&p, real_export_xml()).unwrap();
+        let cancel = AtomicBool::new(true);
+        let outcome =
+            extract_source_objects_with_budget(&p, &ExecutionBudget::default(), Some(&cancel))
+                .unwrap();
+        assert!(outcome.cancelled);
+        assert!(outcome.objects.is_empty());
         let _ = std::fs::remove_file(&p);
     }
 

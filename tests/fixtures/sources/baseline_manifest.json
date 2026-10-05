@@ -34,7 +34,7 @@
   },
   "adjudications": {
     "adjudicationsFile": "golden_adjudications.json",
-    "adjudicationsSha256": "44F4A6D2DC63DD92932A460A092BF592413DB505A78AD210D050501CAD171AAE",
+    "adjudicationsSha256": "F5E1189F83FC456175554F7AE376F564D28E883739C076EE8F83C36031F03B8E",
     "story": "GX-004",
     "adjudicatedCount": 5,
     "note": "golden_issues.json (output Python) permanece intacto; el baseline efectivo es Python + adjudicaciones."

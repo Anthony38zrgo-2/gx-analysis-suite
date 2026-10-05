@@ -47,6 +47,17 @@ export interface ScanFailure {
   error: string;
 }
 
+export interface ScanCoverage {
+  inputs_declared: number;
+  inputs_scanned: number;
+  files_discovered: number;
+  files_excluded: number;
+  files_deduplicated: number;
+  source_free_inputs: number;
+}
+
+export type ScanCompletion = "complete" | "partial" | "cancelled" | "failed";
+
 export interface AnalysisResult {
   schema_version: number;
   request: AnalysisRequest;
@@ -56,6 +67,8 @@ export interface AnalysisResult {
   failures: ScanFailure[];
   policy: QgPolicy;
   verdict: QgVerdict;
+  coverage?: ScanCoverage;
+  completion?: ScanCompletion;
 }
 
 export interface RuleRecord {
@@ -95,6 +108,12 @@ export type ScanProgressEvent =
   | { status: "ok"; path: string; findings_count: number }
   | { status: "error"; path: string; error: string };
 
+export interface ObjectSegment {
+  kind: string;
+  text_start_line: number;
+  member_start_line: number;
+}
+
 export interface ObjectSource {
   id: string;
   object_type: string;
@@ -103,6 +122,7 @@ export interface ObjectSource {
   container_path: string;
   text: string;
   code_start_line: number;
+  segments?: ObjectSegment[];
 }
 
 export interface CommandError {

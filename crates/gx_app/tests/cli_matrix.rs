@@ -32,7 +32,7 @@ fn gx(args: &[&str]) -> Output {
     }
 }
 
-/// golden .txt vía --file (compat): JSON completo, 22 hallazgos, reject=1.
+/// golden .txt vía --file (compat): JSON completo, 23 hallazgos, reject=1.
 #[test]
 fn scan_golden_file_json() {
     let fixture = fixtures("sources/ejemplo_codigo.txt");
@@ -48,8 +48,8 @@ fn scan_golden_file_json() {
         .expect("JSON mode debe ser UN documento válido en reject");
     assert_eq!(json["schema_version"], 1);
     assert_eq!(json["verdict"], "reject");
-    assert_eq!(json["metrics"]["total_findings"], 22);
-    assert_eq!(json["metrics"]["errors"], 14);
+    assert_eq!(json["metrics"]["total_findings"], 23);
+    assert_eq!(json["metrics"]["errors"], 15);
     assert_eq!(json["metrics"]["warnings"], 8);
     assert!(
         json["request"]["inputs"][0]
@@ -58,7 +58,7 @@ fn scan_golden_file_json() {
             .contains("ejemplo_codigo.txt"),
         "procedencia del input presente"
     );
-    assert!(json["findings"].as_array().unwrap().len() == 22);
+    assert!(json["findings"].as_array().unwrap().len() == 23);
     // identidad de objeto presente en los hallazgos
     assert!(json["findings"][0]["object"]["id"].is_string());
 }
@@ -187,6 +187,67 @@ fn scan_without_path_exits_2() {
     assert_eq!(out.code, 2);
 }
 
+/// A01/F01: una regla desconocida es invocación inválida (exit 2), nunca PASS.
+#[test]
+fn scan_unknown_rule_exits_2() {
+    let clean = fixtures("sources/clean_object.txt");
+    let out = gx(&[
+        "scan",
+        "--file",
+        clean.to_str().unwrap(),
+        "--enable",
+        "GX.999",
+    ]);
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("desconocida"), "stderr: {}", out.stderr);
+}
+
+/// A01/F01: `--disable` de una regla inexistente también es invocación inválida.
+#[test]
+fn scan_unknown_disable_exits_2() {
+    let clean = fixtures("sources/clean_object.txt");
+    let out = gx(&[
+        "scan",
+        "--file",
+        clean.to_str().unwrap(),
+        "--disable",
+        "GX.999",
+    ]);
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+}
+
+/// A01/F01: porcentaje fuera de rango es invocación inválida (exit 2).
+#[test]
+fn scan_invalid_percentage_exits_2() {
+    let clean = fixtures("sources/clean_object.txt");
+    let out = gx(&[
+        "scan",
+        "--file",
+        clean.to_str().unwrap(),
+        "--error-pct",
+        "101",
+    ]);
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("Porcentaje"), "stderr: {}", out.stderr);
+}
+
+/// A01/F02: directorio sin archivos fuente → fallo explícito (exit 3), no PASS.
+#[test]
+fn scan_source_free_directory_exits_3() {
+    let dir = std::env::temp_dir().join("gx_cli_source_free");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("datos.csv"), "a,b\n").unwrap();
+    let out = gx(&["scan", dir.to_str().unwrap(), "--format", "json"]);
+    assert_eq!(out.code, 3, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("no contiene archivos fuente"),
+        "stderr: {}",
+        out.stderr
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// --help es preciso y sale con 0.
 #[test]
 fn help_is_accurate() {
@@ -250,6 +311,53 @@ fn enable_filter_selects_rules() {
     let findings = json["findings"].as_array().unwrap();
     assert!(!findings.is_empty());
     assert!(findings.iter().all(|f| f["rule_id"] == "GX.2.3"));
+}
+
+/// A01.6: `--rules-profile local` respeta los flags toggled en la base local;
+/// el perfil default no los mira (semántica explícita, no implícita).
+#[test]
+fn rules_profile_local_reads_db_flags() {
+    let dir = std::env::temp_dir().join("gx_cli_profile_local");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("gx.db");
+    let fixture = fixtures("sources/ejemplo_codigo.txt");
+
+    let out = gx(&["rules", "disable", "GX.2.5", "--db", db.to_str().unwrap()]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+
+    let default_out = gx(&[
+        "scan",
+        "--file",
+        fixture.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    let local_out = gx(&[
+        "scan",
+        "--file",
+        fixture.to_str().unwrap(),
+        "--format",
+        "json",
+        "--rules-profile",
+        "local",
+        "--db",
+        db.to_str().unwrap(),
+    ]);
+    assert_eq!(local_out.code, 1, "stderr: {}", local_out.stderr);
+    let default_json: Value = serde_json::from_str(&default_out.stdout).unwrap();
+    let local_json: Value = serde_json::from_str(&local_out.stdout).unwrap();
+    assert_eq!(default_json["metrics"]["total_findings"], 23);
+    assert_eq!(
+        local_json["metrics"]["total_findings"], 20,
+        "local deshabilitó los 3 GX.2.5"
+    );
+    assert!(local_json["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|f| f["rule_id"] != "GX.2.5"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Catálogo desde Reglas.csv en memoria (sin base local) y listado.
@@ -428,7 +536,7 @@ fn export_pdf_from_scan_json() {
     ]);
     assert_eq!(out.code, 1);
     let json: Value = serde_json::from_str(&out.stdout).unwrap();
-    assert_eq!(json["metrics"]["total_findings"], 22);
+    assert_eq!(json["metrics"]["total_findings"], 23);
     std::fs::write(&json_path, &out.stdout).unwrap();
 
     let out = gx(&[
@@ -439,7 +547,7 @@ fn export_pdf_from_scan_json() {
         pdf_path.to_str().unwrap(),
     ]);
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    assert!(out.stdout.contains("22 hallazgos"));
+    assert!(out.stdout.contains("23 hallazgos"));
     let bytes = std::fs::read(&pdf_path).expect("el PDF debe existir");
     assert!(bytes.starts_with(b"%PDF"));
     assert!(bytes.len() > 1_000);

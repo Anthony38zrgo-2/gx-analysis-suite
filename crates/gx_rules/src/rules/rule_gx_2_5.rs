@@ -53,7 +53,10 @@ define_rule! {
         if me.active_where_line.is_none() {
             return vec![];
         }
-        let mut scan_target = lower.clone();
+        // A03/F03: el valor en código duro vive en un literal de string; el
+        // saneado `clean` lo elimina, así que el escaneo usa la vista
+        // `code_lower` (comentarios fuera, literales presentes).
+        let mut scan_target = line.code_lower.clone();
         if let Some(rest) = scan_target.strip_prefix("where") {
             scan_target = rest.trim().to_string();
         }

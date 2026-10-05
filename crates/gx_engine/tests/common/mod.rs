@@ -23,10 +23,11 @@ pub fn default_enabled() -> HashSet<String> {
     gx_storage::seed::default_enabled_ids()
 }
 
-/// Totales del golden ADJUDICADO (Python + adjudicaciones GX-004) para el
-/// fixture golden; ver tests/fixtures/golden_adjudications.json.
-pub const GOLDEN_TOTAL: usize = 22;
-pub const GOLDEN_ERRORS: usize = 14;
+/// Totales del golden ADJUDICADO (Python + adjudicaciones GX-004/A03) para
+/// el fixture golden; ver tests/fixtures/golden_adjudications.json.
+/// A03/F03 suma GX.2.5 línea 63 (literal de WHERE antes invisible).
+pub const GOLDEN_TOTAL: usize = 23;
+pub const GOLDEN_ERRORS: usize = 15;
 pub const GOLDEN_WARNINGS: usize = 8;
 
 pub fn ctx_for(path: &Path) -> AuditContext {

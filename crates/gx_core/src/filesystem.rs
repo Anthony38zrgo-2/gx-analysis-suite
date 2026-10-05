@@ -3,11 +3,18 @@
 //! Port of `gx_linter/app/core/filesystem.py`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{bail, Result};
 
 /// Accepted GeneXus source extensions (GX-007: incluye .xml).
-pub const SOURCE_EXTENSIONS: &[&str] = &[".txt", ".xml", ".xpz", ".prg", ".gxd", ".src"];
+///
+/// A01/F02: incluye `.zip`/`.rar` porque la extracción los soporta por magic
+/// bytes y el diálogo nativo los ofrece; discovery y extracción comparten la
+/// misma política.
+pub const SOURCE_EXTENSIONS: &[&str] = &[
+    ".txt", ".xml", ".xpz", ".zip", ".rar", ".prg", ".gxd", ".src",
+];
 
 /// Whether `path` has a supported GeneXus source extension (case-insensitive).
 ///
@@ -62,40 +69,97 @@ impl Filesystem {
     /// GX-007: NO hay fallback "cualquier archivo" — los archivos sin
     /// extensión fuente NO se lintean; el caller decide el error.
     pub fn find_source_files(path: &Path) -> Vec<PathBuf> {
-        if path.is_file() {
-            return vec![path.to_path_buf()];
-        }
-
-        let mut found: Vec<PathBuf> = Vec::new();
-        for entry in walkdir::WalkDir::new(path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let p = entry.path();
-            if !p.is_file() {
-                continue;
-            }
-            let name = match p.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n,
-                None => continue,
-            };
-            if name.starts_with('.') {
-                continue;
-            }
-            let ext = p
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| format!(".{e}"))
-                .unwrap_or_default()
-                .to_lowercase();
-            if SOURCE_EXTENSIONS.contains(&ext.as_str()) {
-                found.push(p.to_path_buf());
-            }
-        }
-
-        found.sort();
-        found
+        discover_source_files(path).files
     }
+}
+
+/// Archivo descartado durante el discovery con su motivo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryError {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+/// Reporte de discovery con cobertura estructurada (A01/F02).
+///
+/// `errors` NUNCA se descarta en silencio: un subtree inaccesible se reporta
+/// y el runtime lo convierte en fallo de scan.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscoveryReport {
+    pub files: Vec<PathBuf>,
+    /// Archivos con extensión no soportada u ocultos.
+    pub excluded_files: usize,
+    pub errors: Vec<DiscoveryError>,
+    /// La caminata se detuvo por cancelación (A04).
+    pub cancelled: bool,
+}
+
+/// Descubre archivos fuente bajo `path` reportando exclusiones y errores.
+pub fn discover_source_files(path: &Path) -> DiscoveryReport {
+    discover_source_files_with_cancel(path, None)
+}
+
+/// [`discover_source_files`] con checkpoint de cancelación (A04/F08).
+pub fn discover_source_files_with_cancel(
+    path: &Path,
+    cancel: Option<&AtomicBool>,
+) -> DiscoveryReport {
+    if path.is_file() {
+        return DiscoveryReport {
+            files: vec![path.to_path_buf()],
+            ..Default::default()
+        };
+    }
+
+    let mut report = DiscoveryReport::default();
+    for entry in walkdir::WalkDir::new(path) {
+        if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+            report.cancelled = true;
+            break;
+        }
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                report.errors.push(DiscoveryError {
+                    path: e
+                        .path()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| path.to_path_buf()),
+                    message: format!("No se pudo recorrer el directorio: {e}"),
+                });
+                continue;
+            }
+        };
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let name = match p.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => {
+                report.excluded_files += 1;
+                continue;
+            }
+        };
+        if name.starts_with('.') {
+            report.excluded_files += 1;
+            continue;
+        }
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default()
+            .to_lowercase();
+        if SOURCE_EXTENSIONS.contains(&ext.as_str()) {
+            report.files.push(p.to_path_buf());
+        } else {
+            report.excluded_files += 1;
+        }
+    }
+
+    report.files.sort();
+    report
 }
 
 #[cfg(test)]

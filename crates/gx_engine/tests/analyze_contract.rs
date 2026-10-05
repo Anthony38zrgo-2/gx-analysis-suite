@@ -61,7 +61,7 @@ fn same_request_same_result_with_or_without_history() {
     );
     assert_eq!(a.metrics, b.metrics);
     assert_eq!(a.verdict, b.verdict);
-    assert_eq!(a.metrics.total_findings, 22);
+    assert_eq!(a.metrics.total_findings, 23);
     assert_eq!(a.verdict, QgVerdict::Pass);
 }
 
@@ -90,7 +90,7 @@ fn absolute_policy_pass_and_reject() {
     );
     let r = analyze(&reject);
     assert_eq!(r.verdict, QgVerdict::Reject);
-    assert_eq!(r.metrics.errors, 14);
+    assert_eq!(r.metrics.errors, 15);
 }
 
 /// Política percentage (GUI legada): pass / reject y cero hallazgos.
@@ -126,7 +126,7 @@ fn percentage_policy_pass_reject_and_zero_findings() {
         false,
     );
     let r = analyze(&reject);
-    // 14 de 22 = 63.6% > 10% → reject.
+    // 15 de 23 = 65.2% > 10% → reject.
     assert_eq!(r.verdict, QgVerdict::Reject);
     assert_eq!(r.policy.name(), "percentage");
 }
@@ -180,8 +180,8 @@ fn multi_input_findings_are_deterministic() {
     let a = analyze(&req);
     let b = analyze(&req);
     assert_eq!(a, b);
-    // golden (22) + xpz (2) = 24 hallazgos.
-    assert_eq!(a.metrics.total_findings, 24);
+    // golden (23) + xpz (2) = 25 hallazgos.
+    assert_eq!(a.metrics.total_findings, 25);
     assert_eq!(a.scanned_files, 2);
 }
 

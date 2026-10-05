@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 
 import { readObjectSource } from "../api/client";
 import { toCommandError } from "../api/errors";
-import type { Issue, ObjectSource } from "../api/types";
+import type { Issue, ObjectSegment, ObjectSource } from "../api/types";
 
 const props = defineProps<{
   finding: Issue;
@@ -19,11 +19,32 @@ const loading = ref(false);
 
 const lines = computed(() => source.value?.text.split(/\r?\n/) ?? []);
 
-/** Línea real del miembro (el engine numera el texto extraído 1-based). */
-const memberLine = computed(() => {
+/**
+ * Línea real del miembro para una línea 1-based del texto extraído (A03).
+ * Con segmentos, cada sección (Events/Rules/Subroutines) mapea a su línea
+ * física; sin segmentos se usa el offset legacy.
+ */
+function toMemberLine(textLine: number): number {
+  const segments = source.value?.segments ?? [];
+  let active: ObjectSegment | undefined;
+  for (const segment of segments) {
+    if (textLine >= segment.text_start_line) active = segment;
+  }
+  if (active) {
+    return active.member_start_line + (textLine - active.text_start_line);
+  }
   const base = source.value?.code_start_line ?? 1;
-  return base + props.finding.line_number - 1;
-});
+  return base + textLine - 1;
+}
+
+const memberLine = computed(() => toMemberLine(props.finding.line_number));
+
+const rows = computed(() =>
+  lines.value.map((text, index) => ({
+    text,
+    member: toMemberLine(index + 1),
+  })),
+);
 
 async function load() {
   source.value = null;
@@ -139,20 +160,20 @@ watch(() => props.finding, () => void load());
         </p>
         <template v-else-if="source">
           <div
-            v-for="(line, index) in lines"
-            :id="`source-line-${source.code_start_line + index}`"
-            :key="source.code_start_line + index"
+            v-for="row in rows"
+            :id="`source-line-${row.member}`"
+            :key="row.member"
             class="flex"
             :class="
-              source.code_start_line + index === memberLine
+              row.member === memberLine
                 ? 'bg-amber-900/40 text-amber-100'
                 : 'text-slate-200'
             "
           >
             <span class="w-14 shrink-0 select-none pr-3 text-right text-slate-500">
-              {{ source.code_start_line + index }}
+              {{ row.member }}
             </span>
-            <code class="whitespace-pre">{{ line }}</code>
+            <code class="whitespace-pre">{{ row.text }}</code>
           </div>
         </template>
       </div>

@@ -6,8 +6,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::regex_cache::STRING_COMMENT_PATTERN;
-
 /// Una línea de código fuente GeneXus con su número.
 #[derive(Debug, Clone, Default)]
 pub struct SourceLine {
@@ -54,6 +52,18 @@ pub struct ObjectRef {
     pub package: String,
 }
 
+/// Mapeo de un segmento de código (Events/Rules/Subroutines) dentro del
+/// texto concatenado de un objeto y su línea física en el miembro (A03/F04).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SourceSegment {
+    /// Sección de código: "Events" | "Rules" | "Subroutines" | "Source".
+    pub kind: String,
+    /// Línea (1-based) del texto concatenado donde comienza el segmento.
+    pub text_start_line: u32,
+    /// Línea (1-based) del miembro XML donde comienza el segmento.
+    pub member_start_line: u32,
+}
+
 /// Un objeto fuente extraído de un artefacto (.xpz/.xml/.txt) (GX-006).
 ///
 /// Se evalúa de forma INDEPENDIENTE: el estado de reglas y el corte por
@@ -61,18 +71,35 @@ pub struct ObjectRef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SourceObject {
     pub object: ObjectRef,
-    /// Texto fuente crudo del objeto (CDATA de Events o el archivo entero).
+    /// Texto fuente crudo del objeto (secciones de código concatenadas con
+    /// `\n\n` o el archivo entero).
     pub text: String,
     /// Línea (1-based) del miembro XML donde comienza el texto extraído
     /// (la línea del `<!\[CDATA\[`); 1 para archivos de texto plano.
+    /// Se conserva por compatibilidad: es la primera entrada de `segments`.
     pub code_start_line: u32,
+    /// Segmentos de código con su línea física en el miembro (A03/F04).
+    /// Vacío para objetos de texto plano (mapeo 1:1 desde `code_start_line`).
+    #[serde(default)]
+    pub segments: Vec<SourceSegment>,
 }
 
 impl SourceObject {
     /// Línea del miembro XML correspondiente a `text_line` (1-based del
-    /// texto extraído). El texto y el miembro comparten numeración a partir
-    /// de [`SourceObject::code_start_line`] (GX-006/GX-017).
+    /// texto extraído), usando los segmentos cuando existen (A03/F04).
+    ///
+    /// Los segmentos posteriores al primero pueden comenzar en cualquier
+    /// línea del miembro: la concatenación sintética con `\n\n` NO se usa
+    /// como offset físico.
     pub fn member_line(&self, text_line: u32) -> u32 {
+        if let Some(seg) = self
+            .segments
+            .iter()
+            .rev()
+            .find(|s| text_line >= s.text_start_line)
+        {
+            return seg.member_start_line + (text_line - seg.text_start_line);
+        }
         self.code_start_line + text_line.saturating_sub(1)
     }
 }
@@ -216,6 +243,39 @@ pub struct ScanFailure {
     pub error: String,
 }
 
+/// Cobertura estructurada de un análisis (A01/F02): distingue un directorio
+/// que nunca se analizó de un objeto válido sin código.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanCoverage {
+    /// Inputs declarados en el request.
+    pub inputs_declared: usize,
+    /// Inputs efectivos tras normalización y deduplicación.
+    pub inputs_scanned: usize,
+    /// Archivos fuente descubiertos (post-dedupe, pre-scan).
+    pub files_discovered: usize,
+    /// Archivos descartados por extensión/ocultos durante el discovery.
+    pub files_excluded: usize,
+    /// Archivos descartados por solapamiento con otro input.
+    pub files_deduplicated: usize,
+    /// Inputs que no aportaron ningún archivo fuente (p. ej. directorio vacío).
+    pub source_free_inputs: usize,
+}
+
+/// Estado de completitud de un análisis (A04).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanCompletion {
+    /// Todos los inputs planificados se escanearon sin límites ni cancelación.
+    #[default]
+    Complete,
+    /// El scan se detuvo por presupuesto (deadline/bytes/findings).
+    Partial,
+    /// Cancelado por el usuario.
+    Cancelled,
+    /// Fallo de infraestructura o de validación del request.
+    Failed,
+}
+
 /// Resultado completo de un análisis (GX-010): hallazgos en orden
 /// determinista, métricas, fallos y veredicto con su política.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -232,10 +292,19 @@ pub struct AnalysisResult {
     /// Política que produjo el veredicto (igual a request.policy).
     pub policy: QgPolicy,
     pub verdict: QgVerdict,
+    /// Cobertura estructurada del análisis (A01/F02).
+    #[serde(default)]
+    pub coverage: ScanCoverage,
+    /// Completitud del análisis: complete/partial/cancelled/failed (A04).
+    #[serde(default)]
+    pub completion: ScanCompletion,
 }
 
 /// Línea preprocesada, compartida por todas las reglas.
-/// `clean` / `clean_lower` se calculan UNA sola vez aquí.
+///
+/// `raw`/`content` conservan el texto ORIGINAL (evidencia); `clean` (sin
+/// strings ni comentarios) y `code` (sin comentarios, con strings) se
+/// calculan UNA sola vez aquí a partir de la vista de evaluación.
 #[derive(Debug, Clone)]
 pub struct ParsedLine {
     pub source: SourceLine,
@@ -247,6 +316,9 @@ pub struct ParsedLine {
     pub clean: String,
     pub clean_lower: String,
     pub clean_no_comments: String,
+    /// Vista sin comentarios y CON literales de string (A03/F03).
+    pub code: String,
+    pub code_lower: String,
     pub has_ampersand: bool,
     pub has_equal: bool,
     pub has_where: bool,
@@ -258,15 +330,28 @@ pub struct ParsedLine {
 }
 
 impl ParsedLine {
+    /// Construye la línea desde el texto original (vista de evaluación =
+    /// texto original). Usado por tests y consumidores sin enmascarado.
     pub fn from_source(source: SourceLine) -> Self {
+        let eval = source.content.clone();
+        Self::from_source_with_eval(source, &eval)
+    }
+
+    /// Construye la línea con evidencia original (`source.content`) y una
+    /// vista de evaluación separada (`eval`), p. ej. el texto con comentarios
+    /// de bloque multilínea enmascarados (A03/F03).
+    pub fn from_source_with_eval(source: SourceLine, eval: &str) -> Self {
+        use crate::lexical::strip_line;
+
         let raw = source.content.clone();
-        let stripped = raw.trim().to_string();
+        let stripped = eval.trim().to_string();
         let lower = stripped.to_lowercase();
 
-        // Sanitización: strings + comentarios se borran UNA sola vez.
-        let clean_raw = STRING_COMMENT_PATTERN.replace_all(&raw, "");
-        let clean = clean_raw.trim().to_string();
+        // Sanitización léxica string/comment-aware (A03/F03).
+        let clean = strip_line(eval, false).trim().to_string();
         let clean_lower = clean.to_lowercase();
+        let code = strip_line(eval, true).trim().to_string();
+        let code_lower = code.to_lowercase();
 
         let has_ampersand = clean_lower.contains('&');
         let has_equal = clean_lower.contains('=');
@@ -285,8 +370,10 @@ impl ParsedLine {
             stripped,
             lower,
             clean: clean.clone(),
-            clean_lower: clean_lower.clone(),
+            clean_lower,
             clean_no_comments: clean,
+            code,
+            code_lower,
             has_ampersand,
             has_equal,
             has_where,

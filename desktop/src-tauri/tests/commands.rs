@@ -63,7 +63,7 @@ fn temp_state(name: &str) -> (DesktopState, PathBuf) {
 }
 
 /// El set habilitado del GUI (base local) es idéntico al default del CLI y
-/// reproduce el golden adjudicado: 22 hallazgos (14 ERROR / 8 WARNING).
+/// reproduce el golden adjudicado: 23 hallazgos (15 ERROR / 8 WARNING).
 #[test]
 fn gui_rule_set_matches_cli_default_and_golden() {
     let conn = gx_storage::db::init_memory_db().unwrap();
@@ -77,8 +77,8 @@ fn gui_rule_set_matches_cli_default_and_golden() {
     let request = gui_request(vec![fixture("sources/ejemplo_codigo.txt")], false);
     let result = runtime::analyze(&request);
     assert!(result.failures.is_empty());
-    assert_eq!(result.metrics.total_findings, 22);
-    assert_eq!(result.metrics.errors, 14);
+    assert_eq!(result.metrics.total_findings, 23);
+    assert_eq!(result.metrics.errors, 15);
     assert_eq!(result.metrics.warnings, 8);
     assert_eq!(result.verdict, QgVerdict::Reject);
 }
@@ -109,14 +109,14 @@ fn scan_emits_progress_and_persists_history() {
     let (channel, events) = capture_channel();
 
     let result = tauri::async_runtime::block_on(run_scan(request, channel, &state)).unwrap();
-    assert_eq!(result.metrics.total_findings, 22);
+    assert_eq!(result.metrics.total_findings, 23);
     assert_eq!(result.verdict, QgVerdict::Reject);
 
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2, "un Pending + un Ok: {events:?}");
     assert!(matches!(events[0], ScanProgressEvent::Pending { .. }));
     match &events[1] {
-        ScanProgressEvent::Ok { findings_count, .. } => assert_eq!(*findings_count, 22),
+        ScanProgressEvent::Ok { findings_count, .. } => assert_eq!(*findings_count, 23),
         other => panic!("se esperaba Ok, llegó {other:?}"),
     }
     drop(events);
@@ -125,11 +125,11 @@ fn scan_emits_progress_and_persists_history() {
     let conn = gx_storage::db::init_db_at(&dir.join("gx_linter.db")).unwrap();
     let runs = audit_dao::list_runs(&conn, 10).unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].total_findings, 22);
+    assert_eq!(runs[0].total_findings, 23);
     assert_eq!(runs[0].verdict.as_deref(), Some("reject"));
     assert!(!runs[0].qg_passed);
     let issues = audit_dao::get_issues_for_run(&conn, runs[0].id).unwrap();
-    assert_eq!(issues.len(), 22);
+    assert_eq!(issues.len(), 23);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -187,7 +187,7 @@ fn boundary_validation_rejects_bad_requests() {
     bad_schema.schema_version = 2;
     assert_eq!(
         validate_request(&bad_schema).unwrap_err().code,
-        "invalid_input"
+        "unsupported_schema"
     );
 
     let mut no_inputs = base;

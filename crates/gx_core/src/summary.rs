@@ -105,6 +105,8 @@ mod tests {
                 max_warnings: 999_999,
             },
             verdict: QgVerdict::Reject,
+            coverage: Default::default(),
+            completion: Default::default(),
         }
     }
 

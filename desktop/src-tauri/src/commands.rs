@@ -6,8 +6,8 @@
 //! errores se devuelven estructurados (`CommandError`), nunca como panic.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -18,16 +18,27 @@ use gx_core::models::{AnalysisRequest, AnalysisResult, Issue};
 use gx_engine::runtime::{self, FileProgress, FileProgressState};
 use gx_storage::dao::{audit_dao, rules_dao, settings_dao};
 
-/// Estado compartido: flag de cancelación y base local (inyectable en tests).
+/// Scan activo con su identidad y token de cancelación propios (A04/F08).
+struct ActiveScan {
+    id: u64,
+    token: Arc<AtomicBool>,
+}
+
+/// Estado compartido: scan activo (token por invocación) y base local.
+///
+/// A04: cada invocación tiene su propio `ScanId`/token; un segundo scan NO
+/// puede limpiar ni cancelar el token de otro. Sólo hay un scan activo.
 pub struct DesktopState {
-    cancel: Arc<AtomicBool>,
+    active: Arc<Mutex<Option<ActiveScan>>>,
+    next_id: Arc<AtomicU64>,
     db_path: Option<PathBuf>,
 }
 
 impl Default for DesktopState {
     fn default() -> Self {
         Self {
-            cancel: Arc::new(AtomicBool::new(false)),
+            active: Arc::new(Mutex::new(None)),
+            next_id: Arc::new(AtomicU64::new(0)),
             db_path: None,
         }
     }
@@ -37,13 +48,55 @@ impl DesktopState {
     /// Estado con una base local alternativa (tests / usos avanzados).
     pub fn with_db_path(db_path: PathBuf) -> Self {
         Self {
-            cancel: Arc::new(AtomicBool::new(false)),
+            active: Arc::new(Mutex::new(None)),
+            next_id: Arc::new(AtomicU64::new(0)),
             db_path: Some(db_path),
         }
     }
 
     fn conn(&self) -> Result<rusqlite::Connection, CommandError> {
         open_db(self.db_path.as_deref())
+    }
+
+    /// Registra un scan nuevo; rechaza si ya hay uno en curso (A04).
+    fn begin_scan(&self) -> Result<(u64, Arc<AtomicBool>), CommandError> {
+        let mut guard = self
+            .active
+            .lock()
+            .map_err(|_| CommandError::new("internal", "estado de scan envenenado"))?;
+        if guard.is_some() {
+            return Err(CommandError::new(
+                "scan_in_progress",
+                "Ya hay un escaneo en curso; cancele o espere a que termine.",
+            ));
+        }
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let token = Arc::new(AtomicBool::new(false));
+        *guard = Some(ActiveScan {
+            id,
+            token: token.clone(),
+        });
+        Ok((id, token))
+    }
+
+    /// Libera el scan si el id coincide (un scan viejo no libera uno nuevo).
+    fn finish_scan(&self, id: u64) {
+        if let Ok(mut guard) = self.active.lock() {
+            if guard.as_ref().map(|a| a.id) == Some(id) {
+                *guard = None;
+            }
+        }
+    }
+
+    /// Cancela el scan activo (si hay) y lo informa.
+    fn cancel_active(&self) -> bool {
+        if let Ok(guard) = self.active.lock() {
+            if let Some(active) = guard.as_ref() {
+                active.token.store(true, Ordering::SeqCst);
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -109,42 +162,19 @@ pub fn ping() -> String {
     "pong".to_string()
 }
 
-/// Validación de frontera de una solicitud de análisis (GX-016).
+/// Validación de frontera de una solicitud de análisis (GX-016/A01).
+///
+/// Delega en la validación compartida del engine (esquema, reglas, política)
+/// y añade la comprobación de existencia para dar un error de UX inmediato.
 pub fn validate_request(request: &AnalysisRequest) -> Result<(), CommandError> {
-    if request.schema_version != 1 {
-        return Err(CommandError::new(
-            "invalid_input",
-            format!(
-                "schema_version {} no soportada (esperada 1).",
-                request.schema_version
-            ),
-        ));
-    }
-    if request.inputs.is_empty() {
-        return Err(CommandError::new(
-            "invalid_input",
-            "No hay archivos ni directorios seleccionados.",
-        ));
+    if let Err(e) = runtime::validate_request(request) {
+        return Err(CommandError::new(e.code, e.message));
     }
     for input in &request.inputs {
         if !input.exists() {
             return Err(CommandError::new(
                 "invalid_input",
                 format!("La ruta '{}' no existe.", input.display()),
-            ));
-        }
-    }
-    if request.enabled_rule_ids.is_empty() {
-        return Err(CommandError::new(
-            "invalid_rules",
-            "No hay reglas habilitadas: el escaneo no produciría hallazgos.",
-        ));
-    }
-    for id in &request.enabled_rule_ids {
-        if !runtime::is_known_rule(id) {
-            return Err(CommandError::new(
-                "invalid_rules",
-                format!("Regla desconocida: '{id}'."),
             ));
         }
     }
@@ -168,11 +198,11 @@ pub async fn run_scan(
     state: &DesktopState,
 ) -> Result<AnalysisResult, CommandError> {
     validate_request(&request)?;
-    let cancel = state.cancel.clone();
-    cancel.store(false, Ordering::SeqCst);
+    // A04/F08: token propio por invocación; un segundo scan se rechaza.
+    let (scan_id, cancel) = state.begin_scan()?;
     let db_path = state.db_path.clone();
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let join = tauri::async_runtime::spawn_blocking(move || {
         let emit = |progress: FileProgress| {
             // Un frontend cerrado no debe romper el escaneo.
             let _ = on_progress.send(ScanProgressEvent::from(progress));
@@ -183,8 +213,10 @@ pub async fn run_scan(
         }
         Ok::<AnalysisResult, CommandError>(result)
     })
-    .await
-    .map_err(|e| CommandError::new("internal", format!("la tarea de escaneo falló: {e}")))?
+    .await;
+
+    state.finish_scan(scan_id);
+    join.map_err(|e| CommandError::new("internal", format!("la tarea de escaneo falló: {e}")))?
 }
 
 fn persist_history(
@@ -200,10 +232,12 @@ fn persist_history(
 }
 
 /// Solicita la cancelación del scan en curso (idempotente).
+///
+/// A04: sólo cancela el scan activo; no puede tocar el token de un scan
+/// distinto ni dejar un token global reutilizable.
 #[tauri::command]
 pub fn cancel_scan(state: State<'_, DesktopState>) -> bool {
-    state.cancel.store(true, Ordering::SeqCst);
-    true
+    state.cancel_active()
 }
 
 /// Diálogo nativo de selección de fuentes GeneXus (valida extensiones).
@@ -377,7 +411,15 @@ pub async fn save_pdf(
     Ok(path.to_string_lossy().to_string())
 }
 
-/// Texto fuente de un objeto concreto del artefacto (visor GX-017).
+/// Segmento de código con su mapeo de líneas (A03/F04).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectSegmentDto {
+    pub kind: String,
+    pub text_start_line: u32,
+    pub member_start_line: u32,
+}
+
+/// Texto fuente de un objeto concreto del artefacto (visor GX-017/A03).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectSourceDto {
     pub id: String,
@@ -387,6 +429,9 @@ pub struct ObjectSourceDto {
     pub container_path: String,
     pub text: String,
     pub code_start_line: u32,
+    /// Segmentos del texto concatenado → líneas físicas del miembro (A03).
+    #[serde(default)]
+    pub segments: Vec<ObjectSegmentDto>,
 }
 
 #[tauri::command]
@@ -429,5 +474,14 @@ pub fn read_object_source(
         container_path: found.object.container_path.clone(),
         text: found.text.clone(),
         code_start_line: found.code_start_line,
+        segments: found
+            .segments
+            .iter()
+            .map(|s| ObjectSegmentDto {
+                kind: s.kind.clone(),
+                text_start_line: s.text_start_line,
+                member_start_line: s.member_start_line,
+            })
+            .collect(),
     })
 }

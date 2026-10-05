@@ -61,6 +61,10 @@ enum Commands {
         /// Reglas a deshabilitar sobre el set por defecto.
         #[arg(long, value_delimiter = ',', value_name = "IDS")]
         disable: Vec<String>,
+        /// Perfil de reglas sin --enable: `default` (catálogo del producto) o
+        /// `local` (estado toggled en la base local del usuario).
+        #[arg(long, value_name = "PERFIL", default_value = "default")]
+        rules_profile: String,
         /// Carga el catálogo desde Reglas.csv (en memoria, sin base local).
         #[arg(long, value_name = "CSV")]
         rules_csv: Option<String>,
@@ -149,6 +153,7 @@ fn run(cli: Cli) -> Result<i32> {
             error_pct,
             enable,
             disable,
+            rules_profile,
             rules_csv,
             record_history,
             db,
@@ -162,6 +167,7 @@ fn run(cli: Cli) -> Result<i32> {
             error_pct,
             &enable,
             &disable,
+            &rules_profile,
             rules_csv.as_deref(),
             record_history,
             db.as_deref(),
@@ -180,12 +186,15 @@ fn open_db(db_flag: Option<&str>) -> Result<rusqlite::Connection> {
     res.map_err(|e| anyhow::anyhow!("base de datos: {e}"))
 }
 
-/// Set de reglas efectivo: base por defecto (o CSV), + overrides de CLI.
+/// Set de reglas efectivo: perfil (default/local/CSV) + overrides de CLI.
 ///
 /// `--enable` actúa como whitelist (habilita SÓLO las reglas listadas);
-/// `--disable` quita del set resultante.
+/// `--disable` quita del set resultante. A01: los perfiles son explícitos;
+/// el CLI ya no ignora en silencio el estado local de reglas.
 fn effective_rules(
     rules_csv: Option<&str>,
+    profile: &str,
+    db: Option<&str>,
     enable: &[String],
     disable: &[String],
 ) -> Result<Vec<String>> {
@@ -198,7 +207,16 @@ fn effective_rules(
                 gx_storage::seed::import_reglas_csv(&conn, std::path::Path::new(csv))?;
                 rules_dao::get_enabled_ids(&conn)?.into_iter().collect()
             }
-            None => gx_storage::seed::default_enabled_ids(),
+            None => match profile {
+                "default" => gx_storage::seed::default_enabled_ids(),
+                "local" => {
+                    let conn = open_db(db)?;
+                    rules_dao::get_enabled_ids(&conn)?.into_iter().collect()
+                }
+                other => {
+                    anyhow::bail!("perfil de reglas inválido '{other}' (esperado default|local)")
+                }
+            },
         }
     };
     for id in disable {
@@ -219,6 +237,7 @@ fn cmd_scan(
     error_pct: Option<f32>,
     enable: &[String],
     disable: &[String],
+    profile: &str,
     rules_csv: Option<&str>,
     record_history: bool,
     db: Option<&str>,
@@ -235,6 +254,16 @@ fn cmd_scan(
     }
     let path = PathBuf::from(path_str);
 
+    // A01: un --disable de una regla inexistente es un error de invocación,
+    // no un no-op silencioso.
+    for id in disable {
+        let id = id.trim();
+        if !gx_engine::runtime::is_known_rule(id) {
+            eprintln!("[gx] regla desconocida en --disable: '{id}'");
+            return Ok(EXIT_INVALID);
+        }
+    }
+
     let policy = match error_pct {
         Some(pct) => QgPolicy::Percentage { max_error_pct: pct },
         None => QgPolicy::Absolute {
@@ -246,10 +275,17 @@ fn cmd_scan(
     let request = AnalysisRequest {
         schema_version: 1,
         inputs: vec![path.clone()],
-        enabled_rule_ids: effective_rules(rules_csv, enable, disable)?,
+        enabled_rule_ids: effective_rules(rules_csv, profile, db, enable, disable)?,
         policy,
         record_history,
     };
+
+    // A01/F01: la validación compartida rechaza esquema, reglas y política
+    // inválidos ANTES de escanear; nunca exit 0/PASS con un request inválido.
+    if let Err(e) = gx_engine::runtime::validate_request(&request) {
+        eprintln!("[gx] solicitud inválida: {e}");
+        return Ok(EXIT_INVALID);
+    }
 
     let result = gx_engine::runtime::analyze(&request);
 

@@ -3,7 +3,10 @@ name = "gx-linter-desktop"
 version = "1.0.0"
 description = "GX Linter desktop shell (Tauri 2 + Vue 3)"
 edition = "2021"
-rust-version = "1.77"
+# E01: MSRV REAL = máximo `rust-version` del grafo desktop (muda 0.20 declara
+# 1.90; los crates compartidos usan LazyLock 1.80). CI lo verifica con
+# `cargo +1.90.0 check --locked`.
+rust-version = "1.90"
 
 # Workspace propio: aísla el toolchain Tauri/frontend del workspace del
 # engine (GX-015) sin dejar de consumir las crates por path.

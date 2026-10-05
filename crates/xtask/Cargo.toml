@@ -2,6 +2,13 @@
 name = "xtask"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
+gx_core = { path = "../gx_core" }
+gx_engine = { path = "../gx_engine" }
+gx_rules = { path = "../gx_rules" }
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"

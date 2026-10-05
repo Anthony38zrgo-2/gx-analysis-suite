@@ -23,18 +23,34 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_str(&text).expect("json válido")
 }
 
+fn row_from_finding(f: &Value) -> Row {
+    (
+        f["line_number"].as_u64().unwrap() as u32,
+        f["rule_id"].as_str().unwrap().to_string(),
+        f["severity"].as_str().unwrap().to_string(),
+        f["description"].as_str().unwrap().to_string(),
+        f["line_content"].as_str().unwrap_or_default().to_string(),
+    )
+}
+
 fn rows_from_json(issues: &[Value]) -> Vec<Row> {
-    issues
+    issues.iter().map(row_from_finding).collect()
+}
+
+fn adjudications() -> Vec<Value> {
+    read_json(&fixtures_dir().join("golden_adjudications.json"))["adjudications"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Filas del baseline Python explícitamente REEMPLAZADAS por una adjudicación
+/// (`replaces`): un hallazgo corregido que ya no se emite con la descripción
+/// legacy deja de contar como pérdida de compatibilidad.
+fn replaced_rows(entries: &[Value]) -> Vec<Row> {
+    entries
         .iter()
-        .map(|i| {
-            (
-                i["line_number"].as_u64().unwrap() as u32,
-                i["rule_id"].as_str().unwrap().to_string(),
-                i["severity"].as_str().unwrap().to_string(),
-                i["description"].as_str().unwrap().to_string(),
-                i["line_content"].as_str().unwrap_or_default().to_string(),
-            )
-        })
+        .filter_map(|a| a.get("replaces").map(row_from_finding))
         .collect()
 }
 
@@ -99,25 +115,18 @@ fn baseline_manifest_machine_check() {
     assert_eq!(warnings, metrics["warnings"].as_u64().unwrap() as usize);
 }
 
-/// Baseline Python (intacto) + adjudicaciones explícitas de GX-004.
+/// Baseline Python (intacto, menos reemplazos adjudicados) + adjudicaciones.
 fn expected_baseline() -> Vec<Row> {
     let golden = read_json(&fixtures_dir().join("golden_issues.json"));
-    let adjud = read_json(&fixtures_dir().join("golden_adjudications.json"));
-    let mut rows = rows_from_json(golden["issues"].as_array().unwrap());
-    let deltas: Vec<Row> = adjud["adjudications"]
-        .as_array()
-        .unwrap()
+    let entries = adjudications();
+    let replaced = replaced_rows(&entries);
+    let mut rows: Vec<Row> = rows_from_json(golden["issues"].as_array().unwrap())
+        .into_iter()
+        .filter(|r| !replaced.contains(r))
+        .collect();
+    let deltas: Vec<Row> = entries
         .iter()
-        .map(|a| {
-            let f = &a["finding"];
-            (
-                f["line_number"].as_u64().unwrap() as u32,
-                f["rule_id"].as_str().unwrap().to_string(),
-                f["severity"].as_str().unwrap().to_string(),
-                f["description"].as_str().unwrap().to_string(),
-                f["line_content"].as_str().unwrap_or_default().to_string(),
-            )
-        })
+        .map(|a| row_from_finding(&a["finding"]))
         .collect();
     rows.extend(deltas);
     rows.sort();
@@ -148,12 +157,16 @@ fn golden_parity_canonical() {
 fn python_baseline_is_subset_of_rust_output() {
     let golden = read_json(&fixtures_dir().join("golden_issues.json"));
     let python = rows_from_json(golden["issues"].as_array().unwrap());
+    let replaced = replaced_rows(&adjudications());
     let got = canonical(&scan(
         &source_fixture("ejemplo_codigo.txt"),
         &default_enabled(),
     ));
 
-    let missing: Vec<&Row> = python.iter().filter(|p| !got.contains(p)).collect();
+    let missing: Vec<&Row> = python
+        .iter()
+        .filter(|p| !got.contains(p) && !replaced.contains(p))
+        .collect();
     assert!(
         missing.is_empty(),
         "hallazgos Python perdidos por el Rust: {missing:#?}"

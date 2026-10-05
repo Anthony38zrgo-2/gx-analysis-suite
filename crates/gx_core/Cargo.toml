@@ -2,6 +2,7 @@
 name = "gx_core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 regex = { workspace = true }

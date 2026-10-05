@@ -22,23 +22,16 @@ pub static STRING_COMMENT_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
         .unwrap()
 });
 
-/// Enmascara bloques `/* ... */` MULTILÍNEA preservando los saltos de
-/// línea, para que el linteo por línea no vea el código deshabilitado y
-/// los números de línea no se desplacen (GX-008).
+/// Enmascara bloques `/* ... */` preservando bytes y saltos de línea, para
+/// que el linteo por línea no vea el código deshabilitado y los números de
+/// línea no se desplacen (GX-008/A03).
 ///
+/// La implementación es string-aware (no enmascara `/*` dentro de literales)
+/// y preserva la longitud exacta en bytes: ver [`crate::lexical`].
 /// Un bloque sin `*/` de cierre queda intacto (exclusión documentada).
 pub fn blank_multiline_block_comments(text: &str) -> String {
-    BLOCK_COMMENT_PATTERN
-        .replace_all(text, |caps: &regex::Captures| {
-            let whole = caps.get(0).map(|m| m.as_str()).unwrap_or("");
-            "\n".repeat(whole.matches('\n').count())
-        })
-        .to_string()
+    crate::lexical::mask_block_comments(text)
 }
-
-/// Bloques `/* ... */` que cruzan saltos de línea (solo multilínea).
-static BLOCK_COMMENT_PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| RegexBuilder::new(r"/\*[\s\S]*?\*/").build().unwrap());
 
 /// `&variableName` con primera letra minúscula (violación).
 pub static VARIABLE_LOWERCASE_PATTERN: LazyLock<Regex> =
@@ -89,9 +82,11 @@ pub static DO_NAME_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)(?:^|\s)do\s+(?P<name>'[^']+'|"[^"]+"|[^\s]+)"#).unwrap());
 
 /// Valor en código duro dentro de una cláusula WHERE.
-/// Grupo 2 = literal detectado.
-pub static HARDCODE_PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?i)(?:=|!=|<|>|<=|>=|like)\s*(\d+|'[^']*'|"[^"]*")"#).unwrap());
+/// Grupo 1 = literal detectado. A03: soporta comillas escapadas (`''`/`""`)
+/// y el operador `<>` (adjudicado).
+pub static HARDCODE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(?:!=|<>|<=|>=|=|<|>|\blike)\s*(\d+|'(?:[^']|'')*'|"(?:[^"]|"")*")"#).unwrap()
+});
 
 /// Equivalente funcional a `(?<!&)\b(?:and|or)\b` (Rust no soporta lookbehind).
 /// Devuelve true si hay un `and`/`or` no precedido por `&`.

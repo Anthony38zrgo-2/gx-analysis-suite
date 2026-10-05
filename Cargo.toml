@@ -13,6 +13,9 @@ members = [
 [workspace.package]
 version = "1.0.0"
 edition = "2021"
+# E01: MSRV REAL = máximo `rust-version` del grafo de dependencias
+# (aes 0.9 declara 1.89). CI lo verifica con `cargo +1.89.0 check --locked`.
+rust-version = "1.89"
 authors = ["GX Linter Team"]
 license = "MIT"
 

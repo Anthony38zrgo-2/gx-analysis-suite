@@ -54,6 +54,33 @@
         "line_content": "for each Customer"
       },
       "reason": "GX.1.3 nunca recibía líneas 'where' bajo el despacho Python: el requisito DEFINED BY era imposible de detectar. El for each de la línea 61 declara WHERE (62-65) sin DEFINED BY."
+    },
+    {
+      "replaces": {
+        "rule_id": "GX.2.5",
+        "severity": "ERROR",
+        "line_number": 62,
+        "description": "Mala práctica de mantenibilidad: Se detectó un valor en código duro (Hardcoded) '1' dentro de la cláusula WHERE (Bloque de la línea 62). Se exige parametrizar este valor mediante una variable local antes del For Each.",
+        "line_content": "where CustomerStatus = \"Active\" when &OnlyActive = 1 // Error: WHEN en WHERE"
+      },
+      "finding": {
+        "rule_id": "GX.2.5",
+        "severity": "ERROR",
+        "line_number": 62,
+        "description": "Mala práctica de mantenibilidad: Se detectó un valor en código duro (Hardcoded) '\"active\"' dentro de la cláusula WHERE (Bloque de la línea 62). Se exige parametrizar este valor mediante una variable local antes del For Each.",
+        "line_content": "where CustomerStatus = \"Active\" when &OnlyActive = 1 // Error: WHEN en WHERE"
+      },
+      "reason": "A03/F03 (corrección adjudicada): el saneado legacy eliminaba los strings antes de GX.2.5, así que reportaba el literal '1' de la segunda condición e ignoraba el string \"Active\" de la primera. Con el léxico correcto el primer valor en duro real del WHERE es \"Active\"; se reemplaza la fila Python por la fila corregida."
+    },
+    {
+      "finding": {
+        "rule_id": "GX.2.5",
+        "severity": "ERROR",
+        "line_number": 63,
+        "description": "Mala práctica de mantenibilidad: Se detectó un valor en código duro (Hardcoded) '\"vip\"' dentro de la cláusula WHERE (Bloque de la línea 63). Se exige parametrizar este valor mediante una variable local antes del For Each.",
+        "line_content": "where CustomerType = \"VIP\" // Error: Valor en duro en WHERE"
+      },
+      "reason": "A03/F03 (hallazgo ganado): el literal \"VIP\" del fixture era invisible para GX.2.5 por el saneado legacy. El fixture lo documenta como error esperado; con la vista code_lower se detecta."
     }
   ]
 }

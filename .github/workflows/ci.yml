@@ -1,7 +1,8 @@
 name: ci
 on:
   push:
-    branches: [main]
+    # E01: la rama de entrega del repositorio es `master`.
+    branches: [master]
   pull_request:
 
 env:
@@ -25,14 +26,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   test:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace
+      - run: cargo test --locked --workspace
 
   # GX-014/GATE-CLI: matriz de aceptación del CLI sobre un checkout limpio
   # (sin Python ni repositorio hermano).
@@ -41,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p gx_app --test cli_matrix --release
+      - run: cargo test --locked -p gx_app --test cli_matrix --release
 
   audit:
     runs-on: windows-latest
@@ -56,7 +57,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --workspace --release
+      - run: cargo build --locked --workspace --release
+
+  # E01: MSRV real del grafo de dependencias (engine 1.89, desktop 1.90),
+  # verificado contra los Cargo.lock versionados.
+  msrv:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.89.0 --profile minimal
+      - run: cargo +1.89.0 check --workspace --all-targets --locked
+      # El contexto Tauri embebe `desktop/dist`: hay que generarlo antes del
+      # check con el toolchain mínimo.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+        working-directory: desktop
+      - run: npm run build
+        working-directory: desktop
+      - run: rustup toolchain install 1.90.0 --profile minimal
+      - run: cargo +1.90.0 check --manifest-path desktop/src-tauri/Cargo.toml --locked
+
+  # A02/E01: gate determinista de operation-counts. No usa timings del runner
+  # compartido: valida líneas/objetos/parsers/factories/findings por corrida.
+  bench-gates:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo run --locked --release -p xtask -- bench --check --scenario small-files --files 5 --lines 200
+      - run: cargo run --locked --release -p xtask -- bench --check --scenario wide-xml --files 2 --lines 25
+      - run: cargo run --locked --release -p xtask -- bench --check --scenario clean --files 3 --lines 100
+      - run: cargo run --locked --release -p xtask -- bench --check --scenario real
 
   # GX-015..GX-018: desktop Tauri 2 + Vue. No depende de los jobs del
   # engine/CLI y estos no dependen de Node.
@@ -74,7 +109,7 @@ jobs:
         working-directory: desktop
       - run: npm run build
         working-directory: desktop
-      - run: cargo test
+      - run: cargo test --locked
         working-directory: desktop/src-tauri
       - run: npm run tauri build
         working-directory: desktop

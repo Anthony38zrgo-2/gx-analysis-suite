@@ -11,7 +11,7 @@ los tests de paridad **sin Python, sin venv y sin el repositorio hermano**.
 | `sources/ejemplo_codigo.txt` | Fuente GeneXus (export de reglas) que produce el golden. Committeada, redistribuible, ASCII puro con finales LF. |
 | `sources/baseline_manifest.json` | Procedencia machine-checked: SHA-256 de la fuente y de los goldens, versión Python, reglas habilitadas (15), campos comparados, bugs de porteo corregidos y defectos resueltos. |
 | `../golden_issues.json` | Output ORIGINAL del engine Python sobre la fuente (17 hallazgos: 12 ERROR / 5 WARNING). Intacto — es la referencia de compatibilidad. |
-| `../golden_adjudications.json` | Adjudicaciones GX-004: los 5 hallazgos adicionales que produce el engine Rust corregido, con su razonamiento (huecos demostrables del despacho Python). El baseline efectivo = Python + adjudicaciones (22 hallazgos: 14 ERROR / 8 WARNING). |
+| `../golden_adjudications.json` | Adjudicaciones GX-004: los 6 hallazgos adicionales que produce el engine Rust corregido, con su razonamiento (huecos demostrables del despacho Python). El baseline efectivo = Python + adjudicaciones (23 hallazgos: 15 ERROR / 8 WARNING). |
 | `../golden_snapshot_cli.txt` | Salida CLI capturada (UTF-16LE por artifact de PowerShell; solo referencia humana, no la comparan los tests). |
 | `../rule_manifest.json` | Tabla de verdad de las 30 reglas (24 concretas + 6 abstractas). |
 
@@ -38,7 +38,7 @@ documentan en `plan/PROGRESS.md`.
 
 El despacho Python (TRIGGER_MAP por token aislado) nunca entregaba ciertas
 líneas a reglas con estado: ramas muertas demostrables. Con el despacho
-corregido, el engine Rust emite 5 hallazgos más sobre el fixture golden:
+corregido, el engine Rust emite 6 hallazgos más sobre el fixture golden:
 
 | Línea | Regla | Hueco Python demostrable |
 |---|---|---|
