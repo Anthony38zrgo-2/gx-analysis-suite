@@ -417,9 +417,10 @@ All probes above are now regression tests.
   (byte/newline preservation, total `strip_line`, quoted delimiters) and XML
   mutation fuzzing (truncate/insert/replace) plus archive-limit and
   cancellation assertions.
-- Pending: engine dependency-boundary gate waits for B04; the lockfiles must
-  be committed together with this change for a clean checkout to be
-  reproducible (they are currently untracked in the working tree).
+- Engine dependency-boundary gate implemented as `cargo xtask
+  check-boundaries` (B04): verifies with `cargo tree` that the engine without
+  the `archives` feature does not link SQLite/Tauri/PDF/zip/unrar and that the
+  minimal path compiles. CI runs it in the `test` job.
 
 **Verification after the changes.**
 - `cargo test --workspace`: 134 tests passed (was 93); desktop workspace: 7;
@@ -433,3 +434,70 @@ All probes above are now regression tests.
   p95 34.9 ms, CPU 359 ms, peak working set 23.7 MB, 779,155 allocator
   calls / 36.4 MB reserved, 0.69 ms cancellation latency, first diagnostic at
   3.1 ms. Harness validation only; not a performance claim on real exports.
+
+## 9. Implementation log — Phase B (B01–B04)
+
+**B01 — Source and line ownership.**
+- `ParsedLine<'a>` no longer owns any line text: `raw`/`content`/`stripped`
+  are borrowed from the object buffer and `lower`/`clean`/`clean_lower`/
+  `code`/`code_lower` are `Cow` views (`strip_line_cow`/`lowercase_cow` borrow
+  on the common no-quote/no-uppercase path). The duplicate `source` clone and
+  `clean_no_comments` are gone; rules that retain a line call
+  `to_source_line()` explicitly.
+- The engine iterates `obj.text.split('\n').zip(masked.split('\n'))` without
+  collecting `Vec<&str>`, reuses a candidate-index buffer per object
+  (`collect_candidate_rules_into`) and checks the generated-subroutines
+  boundary without allocating lowercase text
+  (`contains_ignore_ascii_case`).
+- Evidence text is unchanged; golden parity (23 findings) and all rule cases
+  still pass.
+
+**B02 — Immutable registry and reusable plans.**
+- `gx_rules::CATALOG` is a static array of `RuleDescriptor` (id, severity,
+  triggers, route, factory) emitted by `define_rule!`; `catalog()` returns
+  metadata without instantiating anything and `all_rules()` is built from the
+  factories.
+- `RulePlan` compiles the selected descriptors and the dispatch plan once per
+  run; rules are instantiated per worker (thread-local set keyed by plan id,
+  reset per object) instead of per file × catalog. Dispatch plan is built
+  from descriptors (`plan_dispatch_descriptors`).
+- Per-line candidate selection reuses a buffer; a new
+  `rule_set_instantiations` counter makes the contract observable (factory
+  count == sets × selected rules) and the bench gate enforces it.
+
+**B03 — Bounded extraction and scheduling.**
+- `SourceObjectStream` (gx_sources) yields objects per member with budget and
+  cancellation checkpoints; `extract_source_objects_with_budget` is now a
+  drain of that stream, so the engine never retains a whole package before
+  evaluating.
+- `run_file_planned` evaluates objects in bounded chunks (`OBJECT_CHUNK = 16`)
+  using Rayon inside the same configured pool, keeping object/line order and
+  therefore deterministic findings; `run_file_with_budget` keeps the
+  sequential path for callers with an explicit rule set.
+- Equivalence test: a 40-object XML scanned through the sequential path and
+  through the chunked path produces identical findings.
+- RAR remains non-interruptible inside a member (documented); checkpoints run
+  between members.
+
+**B04 — Dependency boundaries.**
+- New `gx_sources` crate owns filesystem discovery and text/XML/ZIP/RAR
+  extraction; ZIP/RAR are behind the `archives` feature (default on). The
+  example that builds an XPZ moved with it.
+- `gx_core` is now pure domain (models, lexical, validation, budget, stats,
+  regex cache, summary) with unused dependencies removed. `gx_engine` no
+  longer depends on `gx_storage`/`rusqlite`; the DB-oriented `load_rules`/
+  `evaluate_file` helpers were removed (no callers). `gx_rules` dropped
+  unused `once_cell`/`thiserror`/`serde`; `gx_app` dropped unused
+  `gx_rules`/`thiserror`.
+- `cargo xtask check-boundaries` verifies the minimal path and CI runs it.
+
+**Verification (Phase B).**
+- `cargo test --workspace`: 136 tests passed; desktop workspace: 7;
+  `npm run build`: passed; clippy `-D warnings` and `cargo fmt --check`:
+  clean in both workspaces; MSRV 1.89 check: clean.
+- Bench gates pass for `small-files`, `wide-xml`, `clean` and `real`
+  (`factories == sets × rules`, sets bounded by objects).
+- Release benchmark (20 files × 500 lines, 5 runs) vs the Phase A close:
+  median 33.2 → 27.2 ms, CPU 359 → 234 ms, allocations 779,155 → 618,439,
+  reserved bytes 36.4 → 28.0 MB, factory instances 480 → 288. Harness
+  validation only; not a performance claim on real exports.

@@ -185,7 +185,7 @@ fn zip_extension_is_accepted_by_content() {
 /// El paquete RAR real se lista con `list_package_members`.
 #[test]
 fn rar_package_members_are_listed() {
-    let members = gx_core::xpz_extractor::list_package_members(&real_fixture("HJFCP716.xpz"))
+    let members = gx_sources::xpz_extractor::list_package_members(&real_fixture("HJFCP716.xpz"))
         .expect("RAR listable");
     assert!(
         members.iter().any(|m| m == "HJFCP716/HJFCP716_1.xml"),

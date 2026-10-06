@@ -17,10 +17,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use gx_core::budget::ExecutionBudget;
-use gx_core::filesystem::discover_source_files;
 use gx_core::models::{AnalysisRequest, QgPolicy};
 use gx_core::stats::{self, ScanStats};
-use gx_core::xpz_extractor::extract_source_objects_with_budget;
+use gx_sources::filesystem::discover_source_files;
+use gx_sources::xpz_extractor::extract_source_objects_with_budget;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -83,6 +83,7 @@ fn main() -> anyhow::Result<()> {
         "build" => build(true),
         "build-debug" => build(false),
         "bench" => bench(&args[1..]),
+        "check-boundaries" => check_boundaries(),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -99,6 +100,7 @@ fn print_help() {
     println!("xtask — helpers del workspace gx-linter-rs");
     println!("  cargo xtask build        release build + copia a dist/gx.exe");
     println!("  cargo xtask build-debug  debug build + copia a dist/gx.exe");
+    println!("  cargo xtask check-boundaries  verifica el path mínimo del engine (B04)");
     println!("  cargo xtask bench        benchmark (requiere release)");
     println!("    --release            exige perfil release (default)");
     println!("    --no-release-check   permite corridas exploratorias en debug");
@@ -136,6 +138,78 @@ fn build(release: bool) -> anyhow::Result<()> {
             destination.display()
         );
     }
+    Ok(())
+}
+
+/// B04/E01: el engine SIN la feature `archives` no debe enlazar SQLite,
+/// Tauri, PDF ni el soporte nativo de ZIP/RAR.
+fn check_boundaries() -> Result<()> {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .context("no se pudo resolver el root del workspace")?;
+
+    let banned = [
+        "rusqlite",
+        "libsqlite3-sys",
+        "sqlite3",
+        "tauri",
+        "printpdf",
+        "lopdf",
+        "zip",
+        "unrar",
+    ];
+
+    let output = Command::new("cargo")
+        .current_dir(&workspace)
+        .args([
+            "tree",
+            "-e",
+            "normal",
+            "-p",
+            "gx_engine",
+            "--no-default-features",
+            "--prefix",
+            "none",
+            "--format",
+            "{p}",
+        ])
+        .output()
+        .context("no se pudo ejecutar cargo tree")?;
+    if !output.status.success() {
+        bail!(
+            "cargo tree falló: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let names: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(|name| name.to_lowercase())
+        .collect();
+    let found: Vec<&str> = banned
+        .iter()
+        .copied()
+        .filter(|banned| names.iter().any(|name| name == banned))
+        .collect();
+    if !found.is_empty() {
+        bail!(
+            "fronteras violadas: el engine sin `archives` enlaza {found:?} \
+             (ver B04 del roadmap)"
+        );
+    }
+
+    // El path mínimo no sólo no enlaza: debe COMPILAR sin la feature.
+    let status = Command::new("cargo")
+        .current_dir(&workspace)
+        .args(["check", "-p", "gx_engine", "--no-default-features"])
+        .status()
+        .context("no se pudo ejecutar cargo check")?;
+    if !status.success() {
+        bail!("el engine sin `archives` no compila (cargo check falló)");
+    }
+
+    println!("[xtask] fronteras OK: engine sin `archives` no enlaza SQLite/Tauri/PDF/zip/unrar");
     Ok(())
 }
 
@@ -746,10 +820,26 @@ fn check_gates(manifest: &CorpusManifest, run: &RunReport, rule_count: usize) ->
             );
         }
     }
-    let expected_factories = manifest.files * rule_count;
-    if stats.rule_factory_invocations as usize != expected_factories {
+    // B02: las factories escalan con los rule-sets instanciados (jobs de
+    // Rayon), no con archivos × catálogo. La RELACIÓN es determinista aunque
+    // el número de jobs no lo sea.
+    if stats.rule_set_instantiations == 0 {
+        bail!("gate de factories: no se instanció ningún rule-set");
+    }
+    // B02: como máximo un rule-set por worker/objeto (no por archivo×catálogo).
+    if let Some(objects) = manifest.expected_objects {
+        if stats.rule_set_instantiations > objects as u64 {
+            bail!(
+                "gate de factories: {} rule-sets para {objects} objetos",
+                stats.rule_set_instantiations
+            );
+        }
+    }
+    let expected_factories = stats.rule_set_instantiations * rule_count as u64;
+    if stats.rule_factory_invocations != expected_factories {
         bail!(
-            "gate de factories: esperadas {expected_factories} y hubo {}",
+            "gate de factories: {expected_factories} esperadas ({} sets × {rule_count}) y hubo {}",
+            stats.rule_set_instantiations,
             stats.rule_factory_invocations
         );
     }

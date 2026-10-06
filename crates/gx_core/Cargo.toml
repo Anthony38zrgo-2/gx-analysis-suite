@@ -5,16 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# B04: dominio puro (modelos, léxico, validación, presupuesto, contadores).
+# Los adapters de filesystem/ZIP/RAR viven en `gx_sources`.
 regex = { workspace = true }
-once_cell = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-encoding_rs = "0.8"
-zip = "2.2"
-unrar = "0.5"
-quick-xml = "0.31"
-walkdir = "2.4"
-rayon = "1.8"
-ignore = "0.4"
-thiserror = { workspace = true }
 serde = { workspace = true }

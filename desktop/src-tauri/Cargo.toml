@@ -27,6 +27,7 @@ serde_json = "1"
 thiserror = "2"
 rusqlite = { version = "0.31", features = ["bundled"] }
 gx_core = { path = "../../crates/gx_core" }
+gx_sources = { path = "../../crates/gx_sources" }
 gx_engine = { path = "../../crates/gx_engine" }
 gx_storage = { path = "../../crates/gx_storage" }
 gx_report = { path = "../../crates/gx_report" }

@@ -61,7 +61,7 @@ define_rule! {
             return vec![];
         }
         me.awaiting_description = true;
-        me.sub_declaration_line = Some(line.source.clone());
+        me.sub_declaration_line = Some(line.to_source_line());
         vec![]
      },
 }

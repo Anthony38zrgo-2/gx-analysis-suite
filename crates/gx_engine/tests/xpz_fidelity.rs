@@ -122,7 +122,7 @@ fn unusable_xpz_is_reported_as_unsupported() {
 #[test]
 fn xpz_members_are_listed() {
     let xpz = source_fixture("sample_package.xpz");
-    let members = gx_core::xpz_extractor::list_xpz_members(&xpz).unwrap();
+    let members = gx_sources::xpz_extractor::list_xpz_members(&xpz).unwrap();
     assert_eq!(members.len(), 2);
     assert!(members.iter().all(|m| m.ends_with(".xml")));
 }

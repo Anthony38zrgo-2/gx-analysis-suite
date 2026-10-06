@@ -77,6 +77,7 @@ pub static TRIGGER_MAP: LazyLock<HashMap<&'static str, TriggerFn>> = LazyLock::n
 });
 
 /// Precomputed per-scan line-selection plan.
+#[derive(Clone)]
 pub struct DispatchPlan {
     rule_count: usize,
     /// Ascending indices of rules that run on every line.
@@ -101,17 +102,33 @@ impl DispatchPlan {
 /// A token route whose trigger token has no flag mapping is an engine
 /// configuration error: it is rejected instead of silently never firing.
 pub fn plan_dispatch(rules: &[Box<dyn Rule>]) -> Result<DispatchPlan, String> {
+    let routes: Vec<DispatchRoute> = rules.iter().map(|r| r.dispatch_route()).collect();
+    plan_dispatch_routes(&routes)
+}
+
+/// Build the plan from static descriptors without instantiating rules (B02).
+pub fn plan_dispatch_descriptors(
+    descriptors: &[&gx_rules::base::RuleDescriptor],
+) -> Result<DispatchPlan, String> {
+    let routes: Vec<DispatchRoute> = descriptors
+        .iter()
+        .map(|descriptor| descriptor.dispatch_route())
+        .collect();
+    plan_dispatch_routes(&routes)
+}
+
+fn plan_dispatch_routes(routes: &[DispatchRoute]) -> Result<DispatchPlan, String> {
     let mut plan = DispatchPlan {
-        rule_count: rules.len(),
+        rule_count: routes.len(),
         all_lines: Vec::new(),
         token_rules: Vec::new(),
     };
-    for (idx, rule) in rules.iter().enumerate() {
-        match rule.dispatch_route() {
+    for (idx, route) in routes.iter().enumerate() {
+        match route {
             DispatchRoute::AllLines => plan.all_lines.push(idx),
             DispatchRoute::Tokens(tokens) => {
                 let mut fns = Vec::with_capacity(tokens.len());
-                for token in tokens {
+                for token in *tokens {
                     let flag = TRIGGER_MAP
                         .get(*token)
                         .ok_or_else(|| format!("trigger token sin mapeo de flag: {token}"))?;
@@ -125,15 +142,25 @@ pub fn plan_dispatch(rules: &[Box<dyn Rule>]) -> Result<DispatchPlan, String> {
 }
 
 /// Rules that must evaluate `parsed`, in ascending registry order.
-pub fn collect_candidate_rules(parsed: &ParsedLine, plan: &DispatchPlan) -> Vec<usize> {
-    let mut selected = vec![false; plan.rule_count];
-    for &i in &plan.all_lines {
-        selected[i] = true;
-    }
-    for &(i, ref flags) in &plan.token_rules {
+pub fn collect_candidate_rules(parsed: &ParsedLine<'_>, plan: &DispatchPlan) -> Vec<usize> {
+    let mut candidates = Vec::with_capacity(plan.rule_count);
+    collect_candidate_rules_into(parsed, plan, &mut candidates);
+    candidates
+}
+
+/// [`collect_candidate_rules`] reutilizando un buffer (B02: sin asignar por
+/// línea después del calentamiento).
+pub fn collect_candidate_rules_into(
+    parsed: &ParsedLine<'_>,
+    plan: &DispatchPlan,
+    out: &mut Vec<usize>,
+) {
+    out.clear();
+    out.extend_from_slice(&plan.all_lines);
+    for &(index, ref flags) in &plan.token_rules {
         if flags.iter().any(|flag| flag(parsed)) {
-            selected[i] = true;
+            out.push(index);
         }
     }
-    (0..plan.rule_count).filter(|&i| selected[i]).collect()
+    out.sort_unstable();
 }

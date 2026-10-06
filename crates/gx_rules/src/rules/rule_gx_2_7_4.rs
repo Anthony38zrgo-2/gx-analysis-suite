@@ -36,24 +36,24 @@ define_rule! {
         if is_assignment {
             let (left, right) = match lower_line.split_once('=') {
                 Some((l, r)) => (l, r),
-                None => (lower_line.as_str(), ""),
+                None => (lower_line.as_ref(), ""),
             };
             for m in VARIABLE_ANY_PATTERN.captures_iter(left) {
                 let var = m.get(1).unwrap().as_str().to_string();
                 me.written_vars.insert(var.clone());
-                me.register_variable(&var, &line.source);
+                me.register_variable(&var, &line.to_source_line());
             }
             for m in VARIABLE_ANY_PATTERN.captures_iter(right) {
                 let var = m.get(1).unwrap().as_str().to_string();
                 me.read_vars.insert(var.clone());
-                me.register_variable(&var, &line.source);
+                me.register_variable(&var, &line.to_source_line());
             }
             return vec![];
         }
         for m in VARIABLE_ANY_PATTERN.captures_iter(lower_line) {
             let var = m.get(1).unwrap().as_str().to_string();
             me.read_vars.insert(var.clone());
-            me.register_variable(&var, &line.source);
+            me.register_variable(&var, &line.to_source_line());
         }
         vec![]
      },

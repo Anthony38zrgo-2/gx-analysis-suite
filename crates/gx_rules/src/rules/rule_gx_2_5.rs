@@ -44,7 +44,7 @@ define_rule! {
             return vec![];
         }
         if starts_with_kw(lower, "where") {
-            me.active_where_line = Some(line.source.clone());
+            me.active_where_line = Some(line.to_source_line());
         } else if starts_with_kw(lower, "defined by") || starts_with_kw(lower, "order") {
             me.active_where_line = None;
         } else if me.active_where_line.is_some() && !is_where_continuation(lower) {
@@ -56,12 +56,12 @@ define_rule! {
         // A03/F03: el valor en código duro vive en un literal de string; el
         // saneado `clean` lo elimina, así que el escaneo usa la vista
         // `code_lower` (comentarios fuera, literales presentes).
-        let mut scan_target = line.code_lower.clone();
-        if let Some(rest) = scan_target.strip_prefix("where") {
-            scan_target = rest.trim().to_string();
-        }
+        let scan_target = match line.code_lower.strip_prefix("where") {
+            Some(rest) => rest.trim(),
+            None => line.code_lower.trim(),
+        };
         let mut issues: Vec<Issue> = Vec::new();
-        if let Some(m) = HARDCODE_PATTERN.captures(&scan_target) {
+        if let Some(m) = HARDCODE_PATTERN.captures(scan_target) {
             // El valor es el único grupo del patrón consolidado; el Python
             // original usaba group(2) de un regex local con el operador
             // capturado aparte (rule_gx_2_5.py:138).

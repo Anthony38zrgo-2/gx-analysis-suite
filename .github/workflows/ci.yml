@@ -34,6 +34,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked --workspace
+      # B04/E01: el engine sin `archives` no enlaza SQLite/Tauri/PDF/zip/unrar.
+      - run: cargo run --locked -p xtask -- check-boundaries
 
   # GX-014/GATE-CLI: matriz de aceptación del CLI sobre un checkout limpio
   # (sin Python ni repositorio hermano).

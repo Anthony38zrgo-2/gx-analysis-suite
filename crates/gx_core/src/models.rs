@@ -1,6 +1,7 @@
 //! Dominio puro: SourceLine, Issue, Severity, AuditMetrics, AuditContext, ParsedLine.
 //! Port de `gx_linter/app/core/models.py` + `gx_linter/app/rules/base.py::ParsedLine`.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -300,25 +301,31 @@ pub struct AnalysisResult {
     pub completion: ScanCompletion,
 }
 
-/// Línea preprocesada, compartida por todas las reglas.
+/// Línea preprocesada, compartida por todas las reglas (B01).
 ///
-/// `raw`/`content` conservan el texto ORIGINAL (evidencia); `clean` (sin
-/// strings ni comentarios) y `code` (sin comentarios, con strings) se
-/// calculan UNA sola vez aquí a partir de la vista de evaluación.
+/// `raw`/`content` conservan el texto ORIGINAL prestado (evidencia). Las
+/// vistas normalizadas son `Cow`: se prestan cuando la línea no requiere
+/// transformación (caso típico) y son owned sólo cuando hay strings,
+/// comentarios o mayúsculas. Ya no se duplica el texto completo por vista ni
+/// se clona la línea completa en `content`.
 #[derive(Debug, Clone)]
-pub struct ParsedLine {
-    pub source: SourceLine,
-    pub content: String,
+pub struct ParsedLine<'a> {
+    /// Número 1-based dentro del texto del objeto.
     pub number: u32,
-    pub raw: String,
-    pub stripped: String,
-    pub lower: String,
-    pub clean: String,
-    pub clean_lower: String,
-    pub clean_no_comments: String,
-    /// Vista sin comentarios y CON literales de string (A03/F03).
-    pub code: String,
-    pub code_lower: String,
+    /// Línea original (sin `\r`): evidencia del diagnóstico.
+    pub raw: &'a str,
+    /// Alias de `raw` (nombre histórico que leen las reglas).
+    pub content: &'a str,
+    /// Vista de evaluación recortada (puede tener comentarios de bloque
+    /// enmascarados, A03/F03).
+    pub stripped: &'a str,
+    pub lower: Cow<'a, str>,
+    /// Sin strings ni comentarios.
+    pub clean: Cow<'a, str>,
+    pub clean_lower: Cow<'a, str>,
+    /// Sin comentarios y CON literales de string (A03/F03).
+    pub code: Cow<'a, str>,
+    pub code_lower: Cow<'a, str>,
     pub has_ampersand: bool,
     pub has_equal: bool,
     pub has_where: bool,
@@ -329,29 +336,42 @@ pub struct ParsedLine {
     pub has_do: bool,
 }
 
-impl ParsedLine {
-    /// Construye la línea desde el texto original (vista de evaluación =
-    /// texto original). Usado por tests y consumidores sin enmascarado.
-    pub fn from_source(source: SourceLine) -> Self {
-        let eval = source.content.clone();
-        Self::from_source_with_eval(source, &eval)
+/// Minúsculas sin asignar cuando el texto ya está en minúsculas (B01).
+pub fn lowercase_cow(text: &str) -> Cow<'_, str> {
+    if text.chars().any(char::is_uppercase) {
+        Cow::Owned(text.to_lowercase())
+    } else {
+        Cow::Borrowed(text)
     }
+}
 
-    /// Construye la línea con evidencia original (`source.content`) y una
-    /// vista de evaluación separada (`eval`), p. ej. el texto con comentarios
-    /// de bloque multilínea enmascarados (A03/F03).
-    pub fn from_source_with_eval(source: SourceLine, eval: &str) -> Self {
-        use crate::lexical::strip_line;
+fn lower_of<'a>(cow: &Cow<'a, str>) -> Cow<'a, str> {
+    match cow {
+        Cow::Borrowed(text) => lowercase_cow(text),
+        Cow::Owned(text) => Cow::Owned(text.to_lowercase()),
+    }
+}
 
-        let raw = source.content.clone();
-        let stripped = eval.trim().to_string();
-        let lower = stripped.to_lowercase();
+fn strip_trimmed<'a>(eval: &'a str, keep_strings: bool) -> Cow<'a, str> {
+    use crate::lexical::strip_line_cow;
+    match strip_line_cow(eval, keep_strings) {
+        Cow::Borrowed(text) => Cow::Borrowed(text.trim()),
+        Cow::Owned(text) => Cow::Owned(text.trim().to_string()),
+    }
+}
+
+impl<'a> ParsedLine<'a> {
+    /// Construye la línea desde evidencia prestada (`raw`) y una vista de
+    /// evaluación (`eval`); ambas viven al menos `'a` (B01).
+    pub fn from_parts(number: u32, raw: &'a str, eval: &'a str) -> Self {
+        let stripped = eval.trim();
+        let lower = lowercase_cow(stripped);
 
         // Sanitización léxica string/comment-aware (A03/F03).
-        let clean = strip_line(eval, false).trim().to_string();
-        let clean_lower = clean.to_lowercase();
-        let code = strip_line(eval, true).trim().to_string();
-        let code_lower = code.to_lowercase();
+        let clean = strip_trimmed(eval, false);
+        let clean_lower = lower_of(&clean);
+        let code = strip_trimmed(eval, true);
+        let code_lower = lower_of(&code);
 
         let has_ampersand = clean_lower.contains('&');
         let has_equal = clean_lower.contains('=');
@@ -363,15 +383,13 @@ impl ParsedLine {
         let has_do = clean_lower.contains("do");
 
         ParsedLine {
-            source,
-            content: raw.clone(),
-            number: 0, // se sobrescribe abajo con source.number
+            number,
             raw,
+            content: raw,
             stripped,
             lower,
-            clean: clean.clone(),
+            clean,
             clean_lower,
-            clean_no_comments: clean,
             code,
             code_lower,
             has_ampersand,
@@ -383,12 +401,21 @@ impl ParsedLine {
             has_case,
             has_do,
         }
-        .with_number()
     }
 
-    fn with_number(mut self) -> Self {
-        self.number = self.source.number;
-        self
+    /// Construye la línea desde una [`SourceLine`] existente (vista de
+    /// evaluación = contenido original). Usado por tests.
+    pub fn from_source(source: &'a SourceLine) -> Self {
+        Self::from_parts(source.number, &source.content, &source.content)
+    }
+
+    /// Evidencia owned para estado de reglas que retienen la línea (B01:
+    /// sólo se asigna en las pocas reglas que la necesitan).
+    pub fn to_source_line(&self) -> SourceLine {
+        SourceLine {
+            number: self.number,
+            content: self.raw.to_string(),
+        }
     }
 
     pub fn line_number(&self) -> u32 {
@@ -396,7 +423,7 @@ impl ParsedLine {
     }
 
     pub fn line_content(&self) -> &str {
-        &self.content
+        self.content
     }
 }
 
@@ -457,7 +484,7 @@ mod tests {
             number: 1,
             content: "  For Each Customer // comment".into(),
         };
-        let p = ParsedLine::from_source(src);
+        let p = ParsedLine::from_source(&src);
         assert_eq!(p.stripped, "For Each Customer // comment");
         assert_eq!(p.clean, "For Each Customer");
         assert!(p.has_for_each);
@@ -471,7 +498,7 @@ mod tests {
             number: 1,
             content: r#"&MyVar = "hello // not comment" // real comment"#.into(),
         };
-        let p = ParsedLine::from_source(src);
+        let p = ParsedLine::from_source(&src);
         assert!(!p.clean.contains("hello"));
         assert!(!p.clean.contains("real comment"));
         assert!(p.has_ampersand);

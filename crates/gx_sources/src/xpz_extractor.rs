@@ -28,8 +28,8 @@ use anyhow::{bail, Result};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
-use crate::budget::ExecutionBudget;
-use crate::models::{ObjectRef, SourceObject, SourceSegment};
+use gx_core::budget::ExecutionBudget;
+use gx_core::models::{ObjectRef, SourceObject, SourceSegment};
 
 /// Máximo de miembros por paquete (protección contra paquetes anómalos).
 pub const MAX_XPZ_MEMBERS: usize = 4096;
@@ -54,6 +54,8 @@ pub struct ExtractionOutcome {
     pub limit: Option<String>,
     /// Cancelación solicitada: los objetos ya extraídos se conservan.
     pub cancelled: bool,
+    /// Bloques `<GXObject>` reconocidos (B03: distingue objeto sin código).
+    pub gx_objects: usize,
 }
 
 impl ExtractionOutcome {
@@ -62,6 +64,7 @@ impl ExtractionOutcome {
             objects,
             limit: None,
             cancelled: false,
+            gx_objects: 0,
         }
     }
 }
@@ -87,33 +90,379 @@ pub fn extract_source_objects_with_budget(
     budget: &ExecutionBudget,
     cancel: Option<&AtomicBool>,
 ) -> Result<ExtractionOutcome> {
+    let mut stream = source_object_stream(file_path, budget, cancel)?;
+    let mut objects = Vec::new();
+    for item in stream.by_ref() {
+        objects.push(item?);
+    }
+    let (limit, cancelled) = stream.finish_flags();
+    Ok(ExtractionOutcome {
+        objects,
+        limit,
+        cancelled,
+        gx_objects: stream.extracted_gx_objects(),
+    })
+}
+
+/// Paso del backend de extracción.
+enum Step {
+    Yield(SourceObject),
+    Done,
+}
+
+enum StreamBackend {
+    /// Objetos ya extraídos (texto/XML de un solo miembro).
+    Buffered(std::vec::IntoIter<SourceObject>),
+    #[cfg(feature = "archives")]
+    Zip {
+        archive: zip::ZipArchive<std::fs::File>,
+        next_index: usize,
+        total_bytes: u64,
+        pending: std::vec::IntoIter<SourceObject>,
+    },
+    #[cfg(feature = "archives")]
+    Rar {
+        archive: Option<unrar::OpenArchive<unrar::Process, unrar::CursorBeforeHeader>>,
+        pending: std::vec::IntoIter<SourceObject>,
+        member_seen: usize,
+        total_bytes: u64,
+        exhausted: bool,
+    },
+}
+
+/// Flujo acotado de objetos (B03): un paquete se evalúa sin retener todos sus
+/// objetos antes de ejecutar reglas.
+///
+/// `next()` devuelve `None` al agotarse, cancelarse o alcanzar un límite de
+/// presupuesto; [`SourceObjectStream::finish_flags`] reporta el motivo para
+/// que el runtime lo convierta en `partial`/`cancelled`.
+pub struct SourceObjectStream<'a> {
+    backend: StreamBackend,
+    /// Artefacto contenedor (mensajes y `ObjectRef`).
+    #[allow(dead_code)]
+    file_path: &'a Path,
+    container: String,
+    budget: &'a ExecutionBudget,
+    cancel: Option<&'a AtomicBool>,
+    limit: Option<String>,
+    cancelled: bool,
+    produced: bool,
+    gx_objects: usize,
+    extracted_objects: usize,
+    warned: bool,
+}
+
+impl<'a> SourceObjectStream<'a> {
+    /// Motivo de corte tras agotar el flujo.
+    pub fn finish_flags(&self) -> (Option<String>, bool) {
+        (self.limit.clone(), self.cancelled)
+    }
+
+    /// Bloques `<GXObject>` reconocidos por el backend (B03).
+    pub fn extracted_gx_objects(&self) -> usize {
+        self.gx_objects
+    }
+
+    fn new_empty(
+        file_path: &'a Path,
+        budget: &'a ExecutionBudget,
+        cancel: Option<&'a AtomicBool>,
+    ) -> Self {
+        SourceObjectStream {
+            backend: StreamBackend::Buffered(Vec::new().into_iter()),
+            file_path,
+            container: file_path.to_string_lossy().to_string(),
+            budget,
+            cancel,
+            limit: None,
+            cancelled: false,
+            produced: false,
+            gx_objects: 0,
+            extracted_objects: 0,
+            warned: false,
+        }
+    }
+
+    /// Un paso del backend, sin lógica de fin de flujo.
+    fn next_step(&mut self) -> Result<Step> {
+        loop {
+            match &mut self.backend {
+                StreamBackend::Buffered(iter) => {
+                    return Ok(match iter.next() {
+                        Some(object) => Step::Yield(object),
+                        None => Step::Done,
+                    });
+                }
+                #[cfg(feature = "archives")]
+                StreamBackend::Zip {
+                    archive,
+                    next_index,
+                    total_bytes,
+                    pending,
+                } => {
+                    if let Some(object) = pending.next() {
+                        return Ok(Step::Yield(object));
+                    }
+                    if *next_index >= archive.len() {
+                        return Ok(Step::Done);
+                    }
+                    let index = *next_index;
+                    *next_index += 1;
+                    let mut member = match archive.by_index(index) {
+                        Ok(member) => member,
+                        Err(e) => {
+                            return Err(anyhow::anyhow!(
+                                "Miembro ZIP ilegible en '{}': {e}",
+                                self.container
+                            ))
+                        }
+                    };
+                    let member_name = member.name().replace('\\', "/");
+                    if member_name.ends_with('/') {
+                        continue;
+                    }
+                    let member_size = member.size();
+                    if member_size > self.budget.max_member_bytes {
+                        self.limit = Some(format!(
+                            "el miembro '{member_name}' de '{}' supera el máximo por miembro ({} > {} bytes)",
+                            self.container, member_size, self.budget.max_member_bytes
+                        ));
+                        return Ok(Step::Done);
+                    }
+                    *total_bytes += member_size;
+                    if *total_bytes > self.budget.max_expanded_bytes {
+                        self.limit = Some(format!(
+                            "el archivo '{}' supera el máximo descomprimido ({} > {} bytes)",
+                            self.container, total_bytes, self.budget.max_expanded_bytes
+                        ));
+                        return Ok(Step::Done);
+                    }
+                    let mut raw = Vec::with_capacity((member_size as usize).min(8 * 1024 * 1024));
+                    use std::io::Read;
+                    if let Err(e) = member.read_to_end(&mut raw) {
+                        return Err(anyhow::anyhow!("Miembro ZIP ilegible '{member_name}': {e}"));
+                    }
+                    let xml_text = match decode_bytes(&raw) {
+                        Some(text) => text,
+                        None => {
+                            return Err(anyhow::anyhow!(
+                                "No se pudo decodificar el miembro '{member_name}' de '{}'.",
+                                self.container
+                            ))
+                        }
+                    };
+                    if xml_text.trim().is_empty() {
+                        continue;
+                    }
+                    let extracted = extract_from_xml_text(
+                        &xml_text,
+                        &self.container,
+                        &member_name,
+                        self.cancel,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    self.gx_objects += extracted.gx_objects;
+                    self.extracted_objects += extracted.objects.len();
+                    if extracted.cancelled {
+                        self.cancelled = true;
+                        return Ok(Step::Done);
+                    }
+                    *pending = extracted.objects.into_iter();
+                }
+                #[cfg(feature = "archives")]
+                StreamBackend::Rar {
+                    archive,
+                    pending,
+                    member_seen,
+                    total_bytes,
+                    exhausted,
+                } => {
+                    if let Some(object) = pending.next() {
+                        return Ok(Step::Yield(object));
+                    }
+                    if *exhausted {
+                        return Ok(Step::Done);
+                    }
+                    // Nota A04: unrar es una operación nativa no interrumpible;
+                    // el checkpoint se evalúa entre miembros, no dentro de `read()`.
+                    let Some(current) = archive.take() else {
+                        *exhausted = true;
+                        return Ok(Step::Done);
+                    };
+                    match current.read_header() {
+                        Ok(Some(state)) => {
+                            let member_name =
+                                state.entry().filename.to_string_lossy().replace('\\', "/");
+                            if member_name.ends_with('/') {
+                                match state.skip() {
+                                    Ok(next) => {
+                                        *archive = Some(next);
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        return Err(anyhow::anyhow!(
+                                            "Miembro RAR ilegible de '{}': {e}",
+                                            self.container
+                                        ))
+                                    }
+                                }
+                            }
+                            *member_seen += 1;
+                            if *member_seen > self.budget.max_members {
+                                self.limit = Some(format!(
+                                    "el archivo '{}' supera el máximo de miembros ({} > {})",
+                                    self.container, member_seen, self.budget.max_members
+                                ));
+                                *exhausted = true;
+                                return Ok(Step::Done);
+                            }
+                            let size = state.entry().unpacked_size;
+                            if size > self.budget.max_member_bytes {
+                                self.limit = Some(format!(
+                                    "el miembro '{member_name}' de '{}' supera el máximo por miembro ({} > {} bytes)",
+                                    self.container, size, self.budget.max_member_bytes
+                                ));
+                                *exhausted = true;
+                                return Ok(Step::Done);
+                            }
+                            *total_bytes += size;
+                            if *total_bytes > self.budget.max_expanded_bytes {
+                                self.limit = Some(format!(
+                                    "el archivo '{}' supera el máximo descomprimido ({} > {} bytes)",
+                                    self.container, total_bytes, self.budget.max_expanded_bytes
+                                ));
+                                *exhausted = true;
+                                return Ok(Step::Done);
+                            }
+                            let (raw, rest) = state.read().map_err(|e| {
+                                anyhow::anyhow!("Miembro RAR ilegible '{member_name}': {e}")
+                            })?;
+                            *archive = Some(rest);
+                            let xml_text = match decode_bytes(&raw) {
+                                Some(text) => text,
+                                None => {
+                                    return Err(anyhow::anyhow!(
+                                    "No se pudo decodificar el miembro '{member_name}' de '{}'.",
+                                    self.container
+                                ))
+                                }
+                            };
+                            if xml_text.trim().is_empty() {
+                                continue;
+                            }
+                            let extracted = extract_from_xml_text(
+                                &xml_text,
+                                &self.container,
+                                &member_name,
+                                self.cancel,
+                            )
+                            .map_err(anyhow::Error::msg)?;
+                            self.gx_objects += extracted.gx_objects;
+                            self.extracted_objects += extracted.objects.len();
+                            if extracted.cancelled {
+                                self.cancelled = true;
+                                return Ok(Step::Done);
+                            }
+                            *pending = extracted.objects.into_iter();
+                        }
+                        Ok(None) => {
+                            *exhausted = true;
+                            return Ok(Step::Done);
+                        }
+                        Err(e) => {
+                            *exhausted = true;
+                            return Err(anyhow::anyhow!(
+                                "Miembro RAR ilegible de '{}': {e}",
+                                self.container
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fin de flujo: layout no soportado o aviso de objetos sin código.
+    fn finish(&mut self) -> Option<Result<SourceObject>> {
+        if self.cancelled || self.limit.is_some() {
+            return None;
+        }
+        if !self.produced {
+            if self.gx_objects == 0 {
+                return Some(Err(anyhow::anyhow!(
+                    "Layout no soportado en '{}': ningún miembro contiene objetos GeneXus \
+                     (<GXObject>) ni bloques <Events><![CDATA[...]]></Events con código. \
+                     El paquete no se lintea como XML de marca.",
+                    self.container
+                )));
+            }
+            if !self.warned {
+                warn_no_code(&self.container, self.gx_objects);
+                self.warned = true;
+            }
+        }
+        None
+    }
+}
+
+impl Iterator for SourceObjectStream<'_> {
+    type Item = Result<SourceObject>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cancelled || self.limit.is_some() {
+            return None;
+        }
+        if is_cancelled(self.cancel) {
+            self.cancelled = true;
+            return None;
+        }
+        match self.next_step() {
+            Ok(Step::Yield(object)) => {
+                self.produced = true;
+                if let Some(limit) =
+                    object_limit(self.budget, self.extracted_objects, &self.container)
+                {
+                    // El objeto actual ya es válido; se corta ANTES del
+                    // siguiente para no exceder el presupuesto.
+                    self.limit = Some(limit);
+                }
+                Some(Ok(object))
+            }
+            Ok(Step::Done) => self.finish(),
+            Err(error) => Some(Err(error)),
+        }
+    }
+}
+
+/// Construye el flujo de objetos de un artefacto (B03).
+pub fn source_object_stream<'a>(
+    file_path: &'a Path,
+    budget: &'a ExecutionBudget,
+    cancel: Option<&'a AtomicBool>,
+) -> Result<SourceObjectStream<'a>> {
     if !file_path.is_file() {
         bail!("El archivo no existe: {}", file_path.display());
     }
-    // F07: la lectura también se acota para texto/XML/paquetes, no sólo por
-    // headers de archivo.
+    let mut stream = SourceObjectStream::new_empty(file_path, budget, cancel);
+
+    // F07: la lectura también se acota para texto/XML/paquetes.
     let input_len = std::fs::metadata(file_path)
         .map(|m| m.len())
         .unwrap_or(u64::MAX);
     if input_len > budget.max_input_bytes {
-        return Ok(ExtractionOutcome {
-            objects: Vec::new(),
-            limit: Some(format!(
-                "el archivo '{}' supera el máximo de entrada ({} > {} bytes)",
-                file_path.display(),
-                input_len,
-                budget.max_input_bytes
-            )),
-            cancelled: false,
-        });
+        stream.limit = Some(format!(
+            "el archivo '{}' supera el máximo de entrada ({} > {} bytes)",
+            file_path.display(),
+            input_len,
+            budget.max_input_bytes
+        ));
+        return Ok(stream);
     }
     if is_cancelled(cancel) {
-        return Ok(ExtractionOutcome {
-            objects: Vec::new(),
-            limit: None,
-            cancelled: true,
-        });
+        stream.cancelled = true;
+        return Ok(stream);
     }
+
     let ext = file_path
         .extension()
         .and_then(|e| e.to_str())
@@ -122,24 +471,75 @@ pub fn extract_source_objects_with_budget(
 
     match ext.as_str() {
         // El contenido manda sobre la extensión: ZIP o RAR.
+        #[cfg(not(feature = "archives"))]
+        "xpz" | "zip" | "rar" => bail!(
+            "El soporte de paquetes ZIP/RAR no está incluido en este build \
+             (feature 'archives'). Archivo: {}",
+            file_path.display()
+        ),
+        #[cfg(feature = "archives")]
         "xpz" | "zip" | "rar" => {
             let head = archive_magic(file_path)?;
             if is_rar_magic(&head) {
-                objects_from_rar(file_path, budget, cancel)
+                let archive = unrar::Archive::new(file_path)
+                    .open_for_processing()
+                    .map_err(|e| anyhow::anyhow!("RAR inválido '{}': {e}", file_path.display()))?;
+                stream.backend = StreamBackend::Rar {
+                    archive: Some(archive),
+                    pending: Vec::new().into_iter(),
+                    member_seen: 0,
+                    total_bytes: 0,
+                    exhausted: false,
+                };
             } else {
-                objects_from_zip(file_path, budget, cancel)
+                let file = std::fs::File::open(file_path)?;
+                let archive = zip::ZipArchive::new(file)
+                    .map_err(|e| anyhow::anyhow!("ZIP inválido '{}': {e}", file_path.display()))?;
+                if archive.is_empty() {
+                    bail!("El archivo '{}' está vacío.", file_path.display());
+                }
+                if archive.len() > budget.max_members {
+                    stream.limit = Some(format!(
+                        "el archivo '{}' supera el máximo de miembros ({} > {})",
+                        file_path.display(),
+                        archive.len(),
+                        budget.max_members
+                    ));
+                    return Ok(stream);
+                }
+                stream.backend = StreamBackend::Zip {
+                    archive,
+                    next_index: 0,
+                    total_bytes: 0,
+                    pending: Vec::new().into_iter(),
+                };
             }
         }
-        "xml" => objects_from_xml(file_path, budget, cancel),
-        "txt" | "prg" | "gxd" | "src" => objects_from_text(file_path, budget, cancel),
+        "xml" => {
+            let outcome = objects_from_xml(file_path, budget, cancel)?;
+            stream.limit = outcome.limit;
+            stream.cancelled = outcome.cancelled;
+            stream.gx_objects = outcome.gx_objects;
+            // `objects_from_xml` ya avisó si había objetos sin código.
+            stream.warned = outcome.gx_objects > 0;
+            stream.backend = StreamBackend::Buffered(outcome.objects.into_iter());
+        }
+        "txt" | "prg" | "gxd" | "src" => {
+            let outcome = objects_from_text(file_path, budget, cancel)?;
+            stream.limit = outcome.limit;
+            stream.cancelled = outcome.cancelled;
+            stream.backend = StreamBackend::Buffered(outcome.objects.into_iter());
+        }
         _ => bail!(
             "Formato no soportado '{}': se esperaban fuentes .xpz, .zip, .rar, .xml, \
              .txt, .prg, .gxd o .src",
             file_path.display()
         ),
     }
+    Ok(stream)
 }
 
+#[cfg(feature = "archives")]
 /// Lee los primeros bytes para identificar el formato del paquete.
 fn archive_magic(file_path: &Path) -> Result<[u8; 8]> {
     use std::io::Read;
@@ -150,26 +550,17 @@ fn archive_magic(file_path: &Path) -> Result<[u8; 8]> {
     Ok(head)
 }
 
+#[cfg(feature = "archives")]
 /// Magic de RAR4 (`Rar!\x1A\x07\x00`) y RAR5 (`Rar!\x1A\x07\x01\x00`).
 fn is_rar_magic(head: &[u8; 8]) -> bool {
     head[0] == b'R' && head[1] == b'a' && head[2] == b'r' && head[3] == b'!'
-}
-
-/// Compatibilidad: contenido concatenado (solo para consumo simple).
-#[deprecated(since = "0.2.0", note = "usar extract_source_objects (GX-006)")]
-pub fn extract_genexus_source(file_path: &Path) -> Result<String> {
-    let objects = extract_source_objects(file_path)?;
-    Ok(objects
-        .iter()
-        .map(|o| o.text.clone())
-        .collect::<Vec<_>>()
-        .join("\n\n"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // Miembros de paquete (ZIP/RAR)
 // ─────────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "archives")]
 /// List member names inside an `.xpz` (ZIP) file.
 pub fn list_xpz_members(xpz_path: &Path) -> Result<Vec<String>> {
     let file = std::fs::File::open(xpz_path)?;
@@ -184,6 +575,7 @@ pub fn list_xpz_members(xpz_path: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
+#[cfg(feature = "archives")]
 /// List member names inside a RAR file.
 pub fn list_rar_members(rar_path: &Path) -> Result<Vec<String>> {
     let listing = unrar::Archive::new(rar_path)
@@ -199,6 +591,7 @@ pub fn list_rar_members(rar_path: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
+#[cfg(feature = "archives")]
 /// List member names of a package (ZIP or RAR, detectado por magic).
 pub fn list_package_members(package_path: &Path) -> Result<Vec<String>> {
     let head = archive_magic(package_path)?;
@@ -223,6 +616,7 @@ fn objects_from_text(
             objects: Vec::new(),
             limit: None,
             cancelled: true,
+            gx_objects: 0,
         });
     }
     let bytes = std::fs::read(file_path)?;
@@ -240,6 +634,7 @@ fn objects_from_text(
             objects: Vec::new(),
             limit: Some("presupuesto de objetos agotado (max_objects=0)".to_string()),
             cancelled: false,
+            gx_objects: 0,
         });
     }
     let name = file_name_lossy(file_path);
@@ -272,6 +667,7 @@ fn objects_from_xml(
             objects: Vec::new(),
             limit: None,
             cancelled: true,
+            gx_objects: 0,
         });
     }
     let bytes = std::fs::read(xml_path)?;
@@ -295,6 +691,7 @@ fn objects_from_xml(
             objects: extracted.objects,
             limit: Some(limit),
             cancelled: extracted.cancelled,
+            gx_objects: extracted.gx_objects,
         });
     }
     if extracted.cancelled {
@@ -302,6 +699,7 @@ fn objects_from_xml(
             objects: extracted.objects,
             limit: None,
             cancelled: true,
+            gx_objects: extracted.gx_objects,
         });
     }
     if extracted.objects.is_empty() {
@@ -314,7 +712,12 @@ fn objects_from_xml(
         }
         warn_no_code(&xml_path.display().to_string(), extracted.gx_objects);
     }
-    Ok(ExtractionOutcome::complete(extracted.objects))
+    Ok(ExtractionOutcome {
+        objects: extracted.objects,
+        limit: None,
+        cancelled: false,
+        gx_objects: extracted.gx_objects,
+    })
 }
 
 /// Motivo de corte si `count` excede `max_objects` (A04).
@@ -327,260 +730,6 @@ fn object_limit(budget: &ExecutionBudget, count: usize, container: &str) -> Opti
     } else {
         None
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Paquete ZIP
-// ─────────────────────────────────────────────────────────────────────────
-
-fn objects_from_zip(
-    xpz_path: &Path,
-    budget: &ExecutionBudget,
-    cancel: Option<&AtomicBool>,
-) -> Result<ExtractionOutcome> {
-    let file = std::fs::File::open(xpz_path)?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| anyhow::anyhow!("ZIP inválido '{}': {e}", xpz_path.display()))?;
-    if archive.is_empty() {
-        bail!("El archivo '{}' está vacío.", xpz_path.display());
-    }
-
-    let container = xpz_path.to_string_lossy().to_string();
-    let mut objects: Vec<SourceObject> = Vec::new();
-    let mut gx_objects: usize = 0;
-    let mut total_bytes: u64 = 0;
-    let stop = |objects: Vec<SourceObject>, reason: String| ExtractionOutcome {
-        objects,
-        limit: Some(reason),
-        cancelled: false,
-    };
-
-    if archive.len() > budget.max_members {
-        return Ok(stop(
-            objects,
-            format!(
-                "el archivo '{}' supera el máximo de miembros ({} > {})",
-                xpz_path.display(),
-                archive.len(),
-                budget.max_members
-            ),
-        ));
-    }
-
-    for i in 0..archive.len() {
-        if is_cancelled(cancel) {
-            return Ok(ExtractionOutcome {
-                objects,
-                limit: None,
-                cancelled: true,
-            });
-        }
-        let mut member = archive.by_index(i)?;
-        let member_name = member.name().replace('\\', "/");
-        if member_name.ends_with('/') {
-            continue;
-        }
-        let member_size = member.size();
-        if member_size > budget.max_member_bytes {
-            return Ok(stop(
-                objects,
-                format!(
-                    "el miembro '{member_name}' de '{}' supera el máximo por miembro ({} > {} bytes)",
-                    xpz_path.display(),
-                    member_size,
-                    budget.max_member_bytes
-                ),
-            ));
-        }
-        total_bytes += member_size;
-        if total_bytes > budget.max_expanded_bytes {
-            return Ok(stop(
-                objects,
-                format!(
-                    "el archivo '{}' supera el máximo descomprimido ({} > {} bytes)",
-                    xpz_path.display(),
-                    total_bytes,
-                    budget.max_expanded_bytes
-                ),
-            ));
-        }
-        let mut raw = Vec::with_capacity((member_size as usize).min(8 * 1024 * 1024));
-        use std::io::Read;
-        member
-            .read_to_end(&mut raw)
-            .map_err(|e| anyhow::anyhow!("Miembro ZIP ilegible '{member_name}': {e}"))?;
-        let xml_text = match decode_bytes(&raw) {
-            Some(t) => t,
-            None => {
-                bail!(
-                    "No se pudo decodificar el miembro '{member_name}' de '{}'.",
-                    xpz_path.display()
-                )
-            }
-        };
-        if xml_text.trim().is_empty() {
-            continue;
-        }
-
-        let extracted = extract_from_xml_text(&xml_text, &container, &member_name, cancel)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        gx_objects += extracted.gx_objects;
-        objects.extend(extracted.objects);
-        if extracted.cancelled {
-            return Ok(ExtractionOutcome {
-                objects,
-                limit: None,
-                cancelled: true,
-            });
-        }
-        if let Some(limit) = object_limit(budget, objects.len(), &container) {
-            return Ok(stop(objects, limit));
-        }
-    }
-
-    if objects.is_empty() {
-        if gx_objects == 0 {
-            bail!(
-                "Layout no soportado en '{}': ningún miembro contiene objetos GeneXus \
-                 (<GXObject>) ni bloques <Events><![CDATA[...]]></Events con código. \
-                 El paquete no se lintea como XML de marca.",
-                xpz_path.display()
-            );
-        }
-        warn_no_code(&xpz_path.display().to_string(), gx_objects);
-    }
-    Ok(ExtractionOutcome::complete(objects))
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Paquete RAR (GeneXus con WinRAR)
-// ─────────────────────────────────────────────────────────────────────────
-
-fn objects_from_rar(
-    xpz_path: &Path,
-    budget: &ExecutionBudget,
-    cancel: Option<&AtomicBool>,
-) -> Result<ExtractionOutcome> {
-    let container = xpz_path.to_string_lossy().to_string();
-    let mut objects: Vec<SourceObject> = Vec::new();
-    let mut gx_objects: usize = 0;
-
-    let mut archive = unrar::Archive::new(xpz_path)
-        .open_for_processing()
-        .map_err(|e| anyhow::anyhow!("RAR inválido '{}': {e}", xpz_path.display()))?;
-
-    let mut member_seen = 0usize;
-    let mut total_bytes: u64 = 0;
-    while let Some(state) = archive
-        .read_header()
-        .map_err(|e| anyhow::anyhow!("Miembro RAR ilegible de '{}': {e}", xpz_path.display()))?
-    {
-        // Nota A04: unrar es una operación nativa no interrumpible; el
-        // checkpoint se evalúa entre miembros, no dentro de `read()`.
-        if is_cancelled(cancel) {
-            return Ok(ExtractionOutcome {
-                objects,
-                limit: None,
-                cancelled: true,
-            });
-        }
-        let member_name = state.entry().filename.to_string_lossy().replace('\\', "/");
-        if member_name.ends_with('/') {
-            archive = state.skip().map_err(|e| {
-                anyhow::anyhow!("Miembro RAR ilegible de '{}': {e}", xpz_path.display())
-            })?;
-            continue;
-        }
-        member_seen += 1;
-        if member_seen > budget.max_members {
-            return Ok(ExtractionOutcome {
-                objects,
-                limit: Some(format!(
-                    "el archivo '{}' supera el máximo de miembros ({} > {})",
-                    xpz_path.display(),
-                    member_seen,
-                    budget.max_members
-                )),
-                cancelled: false,
-            });
-        }
-        let size = state.entry().unpacked_size;
-        if size > budget.max_member_bytes {
-            return Ok(ExtractionOutcome {
-                objects,
-                limit: Some(format!(
-                    "el miembro '{member_name}' de '{}' supera el máximo por miembro ({} > {} bytes)",
-                    xpz_path.display(),
-                    size,
-                    budget.max_member_bytes
-                )),
-                cancelled: false,
-            });
-        }
-        total_bytes += size;
-        if total_bytes > budget.max_expanded_bytes {
-            return Ok(ExtractionOutcome {
-                objects,
-                limit: Some(format!(
-                    "el archivo '{}' supera el máximo descomprimido ({} > {} bytes)",
-                    xpz_path.display(),
-                    total_bytes,
-                    budget.max_expanded_bytes
-                )),
-                cancelled: false,
-            });
-        }
-
-        let (raw, rest) = state
-            .read()
-            .map_err(|e| anyhow::anyhow!("Miembro RAR ilegible '{member_name}': {e}"))?;
-        archive = rest;
-
-        let xml_text = match decode_bytes(&raw) {
-            Some(t) => t,
-            None => {
-                bail!(
-                    "No se pudo decodificar el miembro '{member_name}' de '{}'.",
-                    xpz_path.display()
-                )
-            }
-        };
-        if xml_text.trim().is_empty() {
-            continue;
-        }
-
-        let extracted = extract_from_xml_text(&xml_text, &container, &member_name, cancel)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        gx_objects += extracted.gx_objects;
-        objects.extend(extracted.objects);
-        if extracted.cancelled {
-            return Ok(ExtractionOutcome {
-                objects,
-                limit: None,
-                cancelled: true,
-            });
-        }
-        if let Some(limit) = object_limit(budget, objects.len(), &container) {
-            return Ok(ExtractionOutcome {
-                objects,
-                limit: Some(limit),
-                cancelled: false,
-            });
-        }
-    }
-
-    if objects.is_empty() {
-        if gx_objects == 0 {
-            bail!(
-                "Layout no soportado en '{}': ningún miembro contiene objetos GeneXus \
-                 (<GXObject>) ni bloques <Events><![CDATA[...]]></Events con código. \
-                 El paquete no se lintea como XML de marca.",
-                xpz_path.display()
-            );
-        }
-        warn_no_code(&xpz_path.display().to_string(), gx_objects);
-    }
-    Ok(ExtractionOutcome::complete(objects))
 }
 
 fn warn_no_code(container: &str, gx_objects: usize) {
@@ -670,7 +819,7 @@ fn extract_from_xml_text(
     member: &str,
     cancel: Option<&AtomicBool>,
 ) -> Result<Extracted, String> {
-    crate::stats::count_parser_invocation();
+    gx_core::stats::count_parser_invocation();
     let lines = LineIndex::new(xml_text);
     let mut reader = Reader::from_str(xml_text);
     let mut events: usize = 0;

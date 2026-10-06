@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::State;
 
-use gx_core::filesystem::is_source_extension;
 use gx_core::models::{AnalysisRequest, AnalysisResult, Issue};
+use gx_sources::filesystem::is_source_extension;
 use gx_engine::runtime::{self, FileProgress, FileProgressState};
 use gx_storage::dao::{audit_dao, rules_dao, settings_dao};
 
@@ -447,7 +447,7 @@ pub fn read_object_source(
             format!("El artefacto '{}' no existe.", path.display()),
         ));
     }
-    let objects = gx_core::xpz_extractor::extract_source_objects(&path)
+    let objects = gx_sources::xpz_extractor::extract_source_objects(&path)
         .map_err(|e| CommandError::new("scan", format!("no se pudo abrir el objeto: {e}")))?;
     let candidates: Vec<_> = objects
         .into_iter()

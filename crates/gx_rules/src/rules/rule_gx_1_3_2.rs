@@ -22,7 +22,7 @@ define_rule! {
             return vec![];
         }
         if starts_with_kw(lower, "if") && !starts_with_kw(lower, "elseif") {
-            me.if_stack.push((line.source.clone(), false));
+            me.if_stack.push((line.to_source_line(), false));
             return vec![];
         }
         else if starts_with_kw(lower, "else") && !starts_with_kw(lower, "elseif") {

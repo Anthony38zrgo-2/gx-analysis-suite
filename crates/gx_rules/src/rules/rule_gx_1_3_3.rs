@@ -22,7 +22,7 @@ define_rule! {
             return vec![];
         }
         if starts_with_kw(lower, "do case") {
-            me.case_stack.push((line.source.clone(), false));
+            me.case_stack.push((line.to_source_line(), false));
             return vec![];
         }
         if starts_with_kw(lower, "otherwise") {

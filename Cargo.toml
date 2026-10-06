@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/gx_core",
+    "crates/gx_sources",
     "crates/gx_rules",
     "crates/gx_engine",
     "crates/gx_storage",

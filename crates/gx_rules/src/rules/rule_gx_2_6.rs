@@ -54,7 +54,7 @@ define_rule! {
 
         if *lower_line == "sub" || lower_line.starts_with("sub ") {
             me.in_sub = true;
-            me.sub_declaration_line = Some(line.source.clone());
+            me.sub_declaration_line = Some(line.to_source_line());
             me.has_nullvalue_initialization = false;
             me.sub_name = if stripped.len() > 3 {
                 stripped[3..].trim().to_string()
@@ -80,9 +80,8 @@ define_rule! {
                 return vec![];
             }
             if !me.has_nullvalue_initialization && me.sub_declaration_line.is_some() {
-                let decl_line = ParsedLine::from_source(
-                    me.sub_declaration_line.clone().unwrap(),
-                );
+                let decl_source = me.sub_declaration_line.clone().unwrap();
+                let decl_line = ParsedLine::from_source(&decl_source);
                 let sub_name = me.sub_name.clone();
                 me.sub_declaration_line = None;
                 me.in_sub = false;

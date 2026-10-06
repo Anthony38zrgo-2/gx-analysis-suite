@@ -7,6 +7,3 @@ rust-version.workspace = true
 [dependencies]
 gx_core = { path = "../gx_core" }
 regex = { workspace = true }
-once_cell = { workspace = true }
-thiserror = { workspace = true }
-serde = { workspace = true }

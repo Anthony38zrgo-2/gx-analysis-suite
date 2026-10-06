@@ -20,12 +20,12 @@ pub trait LineInfo {
     fn line_content(&self) -> &str;
 }
 
-impl LineInfo for ParsedLine {
+impl LineInfo for ParsedLine<'_> {
     fn line_number(&self) -> u32 {
         self.number
     }
     fn line_content(&self) -> &str {
-        &self.content
+        self.content
     }
 }
 
@@ -73,6 +73,32 @@ pub enum DispatchRoute {
     Tokens(&'static [&'static str]),
 }
 
+/// Descriptor inmutable de una regla (B02).
+///
+/// Reemplaza a `all_rules()` como fuente de metadatos: el catálogo es estático
+/// y sólo se instancian (vía `factory`) las reglas seleccionadas.
+pub struct RuleDescriptor {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub severity: Severity,
+    pub description: &'static str,
+    pub triggers: &'static [&'static str],
+    pub is_abstract: bool,
+    /// `Some(tokens)` ⇒ ruta `Tokens`; `None` ⇒ `AllLines`.
+    pub tokens_route: Option<&'static [&'static str]>,
+    pub factory: fn() -> Box<dyn Rule>,
+}
+
+impl RuleDescriptor {
+    /// Ruta de despacho declarada por la regla.
+    pub fn dispatch_route(&self) -> DispatchRoute {
+        match self.tokens_route {
+            Some(tokens) => DispatchRoute::Tokens(tokens),
+            None => DispatchRoute::AllLines,
+        }
+    }
+}
+
 /// The core rule contract.
 pub trait Rule: Send + Sync {
     fn id(&self) -> &'static str;
@@ -94,7 +120,7 @@ pub trait Rule: Send + Sync {
         false
     }
     fn reset(&mut self, file: &Path);
-    fn evaluate(&mut self, line: &ParsedLine, ctx: &AuditContext) -> Vec<Issue>;
+    fn evaluate(&mut self, line: &ParsedLine<'_>, ctx: &AuditContext) -> Vec<Issue>;
     fn finalize(&mut self, _ctx: &AuditContext) -> Vec<Issue> {
         vec![]
     }
@@ -106,6 +132,12 @@ pub trait Rule: Send + Sync {
 /// `|me: &mut Self, file: &Path| -> ()`, `|me, line, ctx| -> Vec<Issue>`, etc.
 #[macro_export]
 macro_rules! define_rule {
+    // Rutas internas del descriptor (B02).
+    (@route [$($trig:literal),*]) => { ::core::option::Option::None };
+    (@route [$($trig:literal),*] tokens) => {
+        ::core::option::Option::Some(&[$($trig),*])
+    };
+
     (
         id = $rid:literal,
         name = $rname:literal,
@@ -135,6 +167,19 @@ macro_rules! define_rule {
                     $($field : Default::default()),*
                 }
             }
+
+            /// Descriptor estático para el catálogo (B02).
+            pub const DESCRIPTOR: $crate::base::RuleDescriptor =
+                $crate::base::RuleDescriptor {
+                    id: $rid,
+                    name: $rname,
+                    severity: $sev,
+                    description: $desc,
+                    triggers: &[$($trig),*],
+                    is_abstract: $abs,
+                    tokens_route: $crate::define_rule!(@route [$($trig),*] $($route)?),
+                    factory: || ::std::boxed::Box::new(<$name>::new()),
+                };
         }
 
         impl $crate::base::Rule for $name {
@@ -161,7 +206,7 @@ macro_rules! define_rule {
             }
 
             #[allow(unused_variables)]
-            fn evaluate(&mut self, line: &$crate::base::ParsedLine, ctx: &$crate::base::AuditContext) -> ::std::vec::Vec<$crate::base::Issue> {
+            fn evaluate(&mut self, line: &$crate::base::ParsedLine<'_>, ctx: &$crate::base::AuditContext) -> ::std::vec::Vec<$crate::base::Issue> {
                 ($eval)(self, line, ctx)
             }
 

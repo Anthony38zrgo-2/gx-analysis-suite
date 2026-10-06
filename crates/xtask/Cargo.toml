@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 gx_core = { path = "../gx_core" }
+gx_sources = { path = "../gx_sources" }
 gx_engine = { path = "../gx_engine" }
 gx_rules = { path = "../gx_rules" }
 anyhow = { workspace = true }

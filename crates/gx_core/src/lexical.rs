@@ -114,6 +114,34 @@ fn blank_span(out: &mut [u8], start: usize, end: usize) {
     }
 }
 
+/// `haystack.contains(needle)` sin distinguir mayúsculas ASCII y sin asignar
+/// (B01: evita un `to_lowercase()` por línea).
+pub fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// [`strip_line`] sin asignar cuando la línea no contiene comillas ni marcas
+/// de comentario (camino típico): devuelve un préstamo del texto (B01).
+pub fn strip_line_cow(line: &str, keep_strings: bool) -> std::borrow::Cow<'_, str> {
+    if !line
+        .as_bytes()
+        .iter()
+        .any(|b| matches!(b, b'\'' | b'"' | b'/'))
+    {
+        return std::borrow::Cow::Borrowed(line);
+    }
+    std::borrow::Cow::Owned(strip_line(line, keep_strings))
+}
+
 /// Saneado léxico de UNA línea.
 ///
 /// - Siempre elimina comentarios (`//` hasta el final y `/* ... */`).

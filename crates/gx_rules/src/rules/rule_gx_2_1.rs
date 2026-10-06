@@ -42,7 +42,7 @@ define_rule! {
             return vec![];
         }
         if starts_with_kw(lower, "where") {
-            me.active_where_line = Some(line.source.clone());
+            me.active_where_line = Some(line.to_source_line());
         } else if starts_with_kw(lower, "defined by") || starts_with_kw(lower, "order") {
             me.active_where_line = None;
         } else if me.active_where_line.is_some() && !is_where_continuation(lower) {

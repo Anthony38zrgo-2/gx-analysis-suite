@@ -1,0 +1,21 @@
+[package]
+name = "gx_sources"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["archives"]
+# B04: el soporte nativo de paquetes ZIP/RAR es opcional; un engine mínimo
+# puede compilar sólo texto/XML sin enlazar zip/unrar.
+archives = ["dep:zip", "dep:unrar"]
+
+[dependencies]
+gx_core = { path = "../gx_core" }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+encoding_rs = "0.8"
+quick-xml = "0.31"
+walkdir = "2.4"
+zip = { version = "2.2", optional = true }
+unrar = { version = "0.5", optional = true }

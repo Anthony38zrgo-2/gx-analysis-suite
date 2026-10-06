@@ -10,8 +10,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use gx_core::budget::ExecutionBudget;
-use gx_core::models::{AnalysisRequest, AuditContext, QgPolicy, QgVerdict, ScanCompletion};
-use gx_engine::runtime::{analyze, analyze_with_options, scan_file, validate_request};
+use gx_core::models::{AnalysisRequest, AuditContext, Issue, QgPolicy, QgVerdict, ScanCompletion};
+use gx_engine::runtime::{analyze, analyze_with_options, scan_file, validate_request, RulePlan};
 
 fn fixtures(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -235,6 +235,75 @@ fn preset_cancellation_is_cancelled() {
         .failures
         .iter()
         .any(|f| f.error.contains("cancelado por el usuario")));
+}
+
+/// B02: el plan instancia SÓLO las reglas seleccionadas y reutiliza el
+/// catálogo sin construirlo por archivo.
+#[test]
+fn rule_plan_instantiates_only_selected_rules() {
+    let enabled: HashSet<String> = ["GX.1.1".to_string(), "GX.2.5".to_string()]
+        .into_iter()
+        .collect();
+    let plan = RulePlan::compile(&enabled).unwrap();
+    assert_eq!(plan.rules_len(), 2, "sólo las reglas habilitadas");
+    let rules = plan.instantiate();
+    assert_eq!(rules.len(), 2);
+    assert_eq!(rules[0].id(), "GX.1.1");
+    assert_eq!(rules[1].id(), "GX.2.5");
+
+    let none: HashSet<String> = HashSet::new();
+    assert_eq!(RulePlan::compile(&none).unwrap().rules_len(), 0);
+}
+
+/// B03: la evaluación por chunks paralelos (analyze) emite exactamente los
+/// mismos hallazgos que la ruta secuencial (scan_file) en un XML con más
+/// objetos que `OBJECT_CHUNK`.
+#[test]
+fn chunked_object_evaluation_matches_sequential() {
+    let dir = tmp_dir("gx_engine_chunks");
+    let file = dir.join("wide.xml");
+    let mut xml = String::from("<ExportFile>\n");
+    for index in 0..40 {
+        xml.push_str(&format!(
+            "<GXObject><Procedure><Info><Name>Obj{index:03}</Name></Info>\
+             <Events><![CDATA[for each Customer\n    where CustomerId = 42\n    \
+             &lower = &lower + 1\nendfor\n]]></Events></Procedure></GXObject>\n"
+        ));
+    }
+    xml.push_str("</ExportFile>\n");
+    std::fs::write(&file, xml).unwrap();
+
+    let enabled: HashSet<String> = ["GX.1.1", "GX.2.3", "GX.2.5", "GX.2.6"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let sequential = scan_file(&file, &enabled, &ctx_for(&file)).unwrap();
+
+    let mut ids: Vec<String> = enabled.iter().cloned().collect();
+    ids.sort();
+    let planned = analyze(&request(vec![file.clone()], ids));
+    assert_eq!(planned.scanned_files, 1, "failures: {:?}", planned.failures);
+
+    let key = |issue: &Issue| {
+        (
+            issue.object.as_ref().map(|o| o.id.clone()),
+            issue.line_number,
+            issue.rule_id.clone(),
+            issue.line_content.clone(),
+            issue.severity.as_str(),
+        )
+    };
+    let mut sequential_keys: Vec<_> = sequential.iter().map(key).collect();
+    let mut planned_keys: Vec<_> = planned.findings.iter().map(key).collect();
+    sequential_keys.sort();
+    planned_keys.sort();
+    assert_eq!(sequential_keys, planned_keys);
+    assert!(
+        planned.findings.len() > 16,
+        "el corpus debe ejercitar varios chunks: {}",
+        planned.findings.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A03/F03: un string con marcador de comentario conserva la evidencia.

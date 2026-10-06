@@ -24,7 +24,7 @@ define_rule! {
             return vec![];
         }
         if starts_with_kw(lower, "for each") {
-            me.for_each_stack.push((line.source.clone(), false, false));
+            me.for_each_stack.push((line.to_source_line(), false, false));
             let parts: Vec<&str> = line.clean.trim().split_whitespace().collect();
             if parts.len() < 3 {
                 return vec![make_issue(

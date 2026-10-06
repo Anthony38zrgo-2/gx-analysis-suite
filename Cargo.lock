@@ -225,16 +225,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bstr"
-version = "1.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
-dependencies = [
- "memchr",
- "serde_core",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -743,19 +733,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "globset"
-version = "0.4.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07c34a9410465b45bd9787443bc7370f37735bad04b0f0cd57ff1a3186c98988"
-dependencies = [
- "aho-corasick",
- "bstr",
- "log",
- "regex-automata",
- "regex-syntax",
-]
-
-[[package]]
 name = "glyph-names"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -770,11 +747,9 @@ dependencies = [
  "gx_core",
  "gx_engine",
  "gx_report",
- "gx_rules",
  "gx_storage",
  "rusqlite",
  "serde_json",
- "thiserror 2.0.20",
  "tracing",
  "tracing-subscriber",
 ]
@@ -783,19 +758,8 @@ dependencies = [
 name = "gx_core"
 version = "1.0.0"
 dependencies = [
- "anyhow",
- "encoding_rs",
- "ignore",
- "once_cell",
- "quick-xml",
- "rayon",
  "regex",
  "serde",
- "thiserror 2.0.20",
- "tracing",
- "unrar",
- "walkdir",
- "zip",
 ]
 
 [[package]]
@@ -805,12 +769,11 @@ dependencies = [
  "anyhow",
  "gx_core",
  "gx_rules",
+ "gx_sources",
  "gx_storage",
  "rayon",
- "rusqlite",
  "serde_json",
  "sha2 0.10.9",
- "thiserror 2.0.20",
  "tracing",
 ]
 
@@ -831,10 +794,21 @@ name = "gx_rules"
 version = "1.0.0"
 dependencies = [
  "gx_core",
- "once_cell",
  "regex",
- "serde",
- "thiserror 2.0.20",
+]
+
+[[package]]
+name = "gx_sources"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "encoding_rs",
+ "gx_core",
+ "quick-xml",
+ "tracing",
+ "unrar",
+ "walkdir",
+ "zip",
 ]
 
 [[package]]
@@ -933,22 +907,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
 dependencies = [
  "cc",
-]
-
-[[package]]
-name = "ignore"
-version = "0.4.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00b69833ed729dc5aa7d19541d96d6cf8e9137194207a04916d658e43168402f"
-dependencies = [
- "crossbeam-deque",
- "globset",
- "log",
- "memchr",
- "regex-automata",
- "same-file",
- "walkdir",
- "winapi-util",
 ]
 
 [[package]]
@@ -2241,6 +2199,7 @@ dependencies = [
  "gx_core",
  "gx_engine",
  "gx_rules",
+ "gx_sources",
  "serde",
  "serde_json",
  "sha2 0.10.9",

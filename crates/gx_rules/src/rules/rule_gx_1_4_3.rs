@@ -32,8 +32,8 @@ define_rule! {
         }
         if PARM_START_PATTERN.is_match(lower) {
             me.in_parm_block = true;
-            me.parm_buffer_parts = vec![lower.clone()];
-            me.start_line_obj = Some(line.source.clone());
+            me.parm_buffer_parts = vec![lower.to_string()];
+            me.start_line_obj = Some(line.to_source_line());
             if lower.contains(')') {
                 let issues = me.process_buffered_parm();
                 me.clear_buffer();
@@ -42,7 +42,7 @@ define_rule! {
             return vec![];
         }
         if me.in_parm_block {
-            me.parm_buffer_parts.push(lower.clone());
+            me.parm_buffer_parts.push(lower.to_string());
             if lower.contains(')') {
                 let issues = me.process_buffered_parm();
                 me.clear_buffer();

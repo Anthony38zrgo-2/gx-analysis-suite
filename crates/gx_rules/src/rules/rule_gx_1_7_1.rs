@@ -33,7 +33,7 @@ define_rule! {
             return vec![];
         }
         if me.first_line_obj.is_none() {
-            me.first_line_obj = Some(line.source.clone());
+            me.first_line_obj = Some(line.to_source_line());
         }
         let stripped = &line.stripped;
         if stripped.is_empty() {

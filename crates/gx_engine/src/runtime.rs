@@ -7,43 +7,19 @@ use std::time::Instant;
 
 use anyhow::Result;
 use gx_core::budget::ExecutionBudget;
-use gx_core::filesystem::{discover_source_files_with_cancel, is_source_extension};
-use gx_core::lexical::mask_block_comments;
+use gx_core::lexical::{contains_ignore_ascii_case, mask_block_comments};
 use gx_core::models::{
     AnalysisRequest, AnalysisResult, AuditContext, AuditMetrics, Issue, ParsedLine, QgVerdict,
-    ScanCompletion, ScanCoverage, ScanFailure, SourceLine,
+    ScanCompletion, ScanCoverage, ScanFailure,
 };
 use gx_core::validation::{validate_request_shape, ValidationError};
-use gx_core::xpz_extractor::extract_source_objects_with_budget;
-use gx_rules::base::Rule;
-use gx_storage::dao::rules_dao;
+use gx_rules::base::{Rule, RuleDescriptor};
+use gx_sources::filesystem::{discover_source_files_with_cancel, is_source_extension};
 
-use crate::dispatch::{collect_candidate_rules, plan_dispatch, DispatchPlan};
+use crate::dispatch::{collect_candidate_rules_into, plan_dispatch_descriptors, DispatchPlan};
 
 /// Mensaje canónico de cancelación (usado para clasificar la completitud).
 pub const CANCELLED_MESSAGE: &str = "cancelado por el usuario";
-
-/// Load enabled, non-abstract rules and build the dispatch plan.
-///
-/// Mirrors `runtime.load_rules`: filters abstract rules and disabled rules.
-/// GX-009: un id sin fila en el catálogo se considera DESHABILITADO
-/// (fail-closed) y los errores de SQL se propagan.
-pub fn load_rules(conn: &rusqlite::Connection) -> Result<(Vec<Box<dyn Rule>>, DispatchPlan)> {
-    let all = gx_rules::all_rules();
-    let mut rules: Vec<Box<dyn Rule>> = Vec::new();
-
-    for rule in all {
-        if rule.is_abstract() {
-            continue;
-        }
-        if !rules_dao::is_rule_enabled(conn, rule.id())? {
-            continue;
-        }
-        rules.push(rule);
-    }
-    let plan = plan_dispatch(&rules).map_err(anyhow::Error::msg)?;
-    Ok((rules, plan))
-}
 
 /// Evaluate a single artifact: reset → per-object evaluation → per-object
 /// finalize.
@@ -85,7 +61,102 @@ pub struct FileRunOutcome {
 /// Checkpoint de cancelación/presupuesto cada N líneas (A04).
 const LINE_CHECKPOINT: usize = 512;
 
-/// Evalúa un archivo con presupuesto y token de cancelación (A04).
+/// Resultado de evaluar UN objeto (B03).
+struct ObjectRun {
+    issues: Vec<Issue>,
+    limit: Option<String>,
+    cancelled: bool,
+}
+
+/// Evalúa un objeto completo: reset → líneas → finalize → identidad.
+///
+/// Compartido por la ruta secuencial y la ruta por chunks paralelos.
+fn evaluate_object(
+    rules: &mut [Box<dyn Rule>],
+    dispatch: &DispatchPlan,
+    path: &Path,
+    object: &gx_core::models::SourceObject,
+    ctx: &AuditContext,
+    budget: &ExecutionBudget,
+    cancel: Option<&AtomicBool>,
+) -> ObjectRun {
+    // Estado por objeto: reset antes de cada objeto (GX-006).
+    for rule in rules.iter_mut() {
+        rule.reset(path);
+    }
+    let mut issues: Vec<Issue> = Vec::new();
+    let mut limit: Option<String> = None;
+    let mut cancelled = false;
+    // A03/F03: la vista de evaluación enmascara comentarios de bloque
+    // (string-aware, preservando bytes/líneas); la EVIDENCIA (`raw`/
+    // `content` de cada ParsedLine) conserva el texto original.
+    // B01: sin Vec<&str> ni clones por línea; `ParsedLine` presta el texto.
+    let masked = mask_block_comments(&object.text);
+    let mut candidates: Vec<usize> = Vec::with_capacity(16);
+
+    'lines: for (index, (raw_line, eval_line)) in
+        object.text.split('\n').zip(masked.split('\n')).enumerate()
+    {
+        // Checkpoint de cancelación/presupuesto dentro del linteo (A04).
+        if index != 0 && index.is_multiple_of(LINE_CHECKPOINT) {
+            if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+                cancelled = true;
+                break 'lines;
+            }
+            if budget.is_expired() {
+                limit = Some("deadline de la corrida agotado".to_string());
+                break 'lines;
+            }
+        }
+        let raw = raw_line.trim_end_matches('\r');
+        let eval = eval_line.trim_end_matches('\r');
+        if contains_ignore_ascii_case(eval, "generated subroutines (public)") {
+            break;
+        }
+        let parsed = ParsedLine::from_parts(index as u32 + 1, raw, eval);
+        if parsed.stripped.is_empty() {
+            continue;
+        }
+        gx_core::stats::count_line();
+        collect_candidate_rules_into(&parsed, dispatch, &mut candidates);
+        gx_core::stats::count_rule_evaluations(candidates.len());
+        for &rule_index in &candidates {
+            let result = rules[rule_index].evaluate(&parsed, ctx);
+            if !result.is_empty() {
+                gx_core::stats::note_first_finding();
+            }
+            issues.extend(result);
+        }
+        if issues.len() >= budget.max_findings {
+            limit = Some(format!(
+                "límite de hallazgos retenidos alcanzado ({})",
+                budget.max_findings
+            ));
+            break 'lines;
+        }
+    }
+
+    // Finalize por objeto: los hallazgos pendientes pertenecen al objeto.
+    for rule in rules.iter_mut() {
+        issues.extend(rule.finalize(ctx));
+    }
+
+    // Stamp de identidad de objeto (GX-006).
+    let object_ref = object.object.clone();
+    for issue in issues.iter_mut() {
+        issue.object = Some(object_ref.clone());
+    }
+
+    ObjectRun {
+        issues,
+        limit,
+        cancelled,
+    }
+}
+
+/// Evalúa un archivo con presupuesto y token de cancelación (A04/B03).
+///
+/// Ruta secuencial: objetos en orden, un rule-set provisto por el llamador.
 pub fn run_file_with_budget(
     rules: &mut [Box<dyn Rule>],
     dispatch: &DispatchPlan,
@@ -94,23 +165,25 @@ pub fn run_file_with_budget(
     budget: &ExecutionBudget,
     cancel: Option<&AtomicBool>,
 ) -> Result<FileRunOutcome> {
-    let extraction = extract_source_objects_with_budget(path, budget, cancel)?;
-    let objects = extraction.objects;
-    gx_core::stats::count_objects(objects.len());
-    let mut issues: Vec<Issue> = Vec::new();
-
     let t_start = Instant::now();
-    let mut rules_fired_total: usize = 0;
-    let mut limit = extraction.limit.clone();
-    let mut cancelled = extraction.cancelled;
-    let mut line_checks: usize = 0;
+    let mut stream = gx_sources::xpz_extractor::source_object_stream(path, budget, cancel)?;
+    let mut issues: Vec<Issue> = Vec::new();
+    let mut limit: Option<String> = None;
+    let mut cancelled = false;
+    let mut objects: usize = 0;
 
-    'objects: for obj in &objects {
-        if cancelled || limit.is_some() {
+    for item in stream.by_ref() {
+        let object = item?;
+        objects += 1;
+        gx_core::stats::count_objects(1);
+        let run = evaluate_object(rules, dispatch, path, &object, ctx, budget, cancel);
+        issues.extend(run.issues);
+        if run.cancelled {
+            cancelled = true;
             break;
         }
-        if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
-            cancelled = true;
+        if let Some(reason) = run.limit {
+            limit = Some(reason);
             break;
         }
         if budget.is_expired() {
@@ -124,88 +197,147 @@ pub fn run_file_with_budget(
             ));
             break;
         }
-        // Estado por objeto: reset antes de cada objeto (GX-006).
-        for r in rules.iter_mut() {
-            r.reset(path);
-        }
-        let obj_start = issues.len();
-        // A03/F03: la vista de evaluación enmascara comentarios de bloque
-        // (string-aware, preservando bytes/líneas); la EVIDENCIA (`raw`/
-        // `content` de cada ParsedLine) conserva el texto original.
-        let masked = mask_block_comments(&obj.text);
-        let original_lines: Vec<&str> = obj.text.split('\n').collect();
-        let masked_lines: Vec<&str> = masked.split('\n').collect();
+    }
 
-        for (idx, (raw_line, eval_line)) in
-            original_lines.iter().zip(masked_lines.iter()).enumerate()
-        {
-            // Checkpoint de cancelación/presupuesto dentro del linteo (A04).
-            line_checks += 1;
-            if line_checks.is_multiple_of(LINE_CHECKPOINT) {
-                if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
-                    cancelled = true;
-                    break 'objects;
-                }
-                if budget.is_expired() {
-                    limit = Some("deadline de la corrida agotado".to_string());
-                    break 'objects;
-                }
-                if issues.len() >= budget.max_findings {
-                    limit = Some(format!(
-                        "límite de hallazgos retenidos alcanzado ({})",
-                        budget.max_findings
-                    ));
-                    break 'objects;
-                }
-            }
-            let content = raw_line.trim_end_matches('\r');
-            let eval = eval_line.trim_end_matches('\r');
-            if eval
-                .to_lowercase()
-                .contains("generated subroutines (public)")
-            {
-                break;
-            }
-            let source = SourceLine {
-                number: idx as u32 + 1,
-                content: content.to_string(),
-            };
-            let parsed = ParsedLine::from_source_with_eval(source, eval);
-            if parsed.stripped.is_empty() {
-                continue;
-            }
-            gx_core::stats::count_line();
-            let candidates = collect_candidate_rules(&parsed, dispatch);
-            rules_fired_total += candidates.len();
-            gx_core::stats::count_rule_evaluations(candidates.len());
-            for idx in candidates {
-                let result = rules[idx].evaluate(&parsed, ctx);
-                if !result.is_empty() {
-                    gx_core::stats::note_first_finding();
-                }
-                issues.extend(result);
-            }
-            if issues.len() >= budget.max_findings {
-                limit = Some(format!(
-                    "límite de hallazgos retenidos alcanzado ({})",
-                    budget.max_findings
-                ));
-                break 'objects;
+    let (stream_limit, stream_cancelled) = stream.finish_flags();
+    if limit.is_none() {
+        limit = stream_limit;
+    }
+    cancelled |= stream_cancelled;
+    finish_file_run(path, t_start, objects, issues, limit, cancelled)
+}
+
+/// Chunk de objetos evaluados en paralelo dentro de un paquete (B03).
+const OBJECT_CHUNK: usize = 16;
+
+/// Evalúa un archivo con el plan compartido, paralelizando los objetos de un
+/// mismo paquete en chunks acotados (B03).
+///
+/// - La memoria activa queda acotada por `OBJECT_CHUNK` objetos, no por el
+///   contenido total del paquete.
+/// - Los resultados se recolectan en orden de objeto (chunks secuenciales,
+///   `collect` indexado dentro del chunk), así que los hallazgos siguen
+///   siendo deterministas.
+pub fn run_file_planned(
+    plan: &RulePlan,
+    path: &Path,
+    ctx: &AuditContext,
+    budget: &ExecutionBudget,
+    cancel: Option<&AtomicBool>,
+) -> Result<FileRunOutcome> {
+    use rayon::prelude::*;
+
+    let t_start = Instant::now();
+    let mut stream = gx_sources::xpz_extractor::source_object_stream(path, budget, cancel)?;
+    let mut issues: Vec<Issue> = Vec::new();
+    let mut limit: Option<String> = None;
+    let mut cancelled = false;
+    let mut objects: usize = 0;
+    let mut chunk: Vec<gx_core::models::SourceObject> = Vec::with_capacity(OBJECT_CHUNK);
+
+    loop {
+        chunk.clear();
+        while chunk.len() < OBJECT_CHUNK {
+            match stream.next() {
+                Some(Ok(object)) => chunk.push(object),
+                Some(Err(error)) => return Err(error),
+                None => break,
             }
         }
-
-        // Finalize por objeto: los hallazgos pendientes pertenecen al objeto.
-        for r in rules.iter_mut() {
-            issues.extend(r.finalize(ctx));
+        if chunk.is_empty() {
+            break;
         }
+        objects += chunk.len();
+        let results: Vec<ObjectRun> = chunk
+            .par_iter()
+            .map(|object| {
+                gx_core::stats::count_objects(1);
+                with_worker_rules(plan, |rules| {
+                    evaluate_object(rules, plan.dispatch(), path, object, ctx, budget, cancel)
+                })
+            })
+            .collect();
 
-        // Stamp de identidad de objeto (GX-006).
-        let object_ref = obj.object.clone();
-        for issue in issues[obj_start..].iter_mut() {
-            issue.object = Some(object_ref.clone());
+        let mut stop_limit: Option<String> = None;
+        let mut stop_cancelled = false;
+        for run in results {
+            if run.cancelled {
+                stop_cancelled = true;
+            }
+            if run.limit.is_some() {
+                stop_limit = run.limit;
+            }
+            issues.extend(run.issues);
+        }
+        if stop_cancelled {
+            cancelled = true;
+            break;
+        }
+        if stop_limit.is_some() {
+            limit = stop_limit;
+            break;
+        }
+        if budget.is_expired() {
+            limit = Some("deadline de la corrida agotado".to_string());
+            break;
+        }
+        if issues.len() >= budget.max_findings {
+            limit = Some(format!(
+                "límite de hallazgos retenidos alcanzado ({})",
+                budget.max_findings
+            ));
+            break;
         }
     }
 
+    let (stream_limit, stream_cancelled) = stream.finish_flags();
+    if limit.is_none() {
+        limit = stream_limit;
+    }
+    cancelled |= stream_cancelled;
+    finish_file_run(path, t_start, objects, issues, limit, cancelled)
+}
+
+/// Rule-set reutilizable por worker para un plan concreto (B02).
+struct ThreadRuleSet {
+    plan_id: u64,
+    rules: Vec<Box<dyn Rule>>,
+}
+
+thread_local! {
+    static THREAD_RULE_SET: std::cell::RefCell<Option<ThreadRuleSet>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Ejecuta `f` con el rule-set del worker actual, instanciándolo UNA vez por
+/// worker y plan (y reseteándolo por objeto dentro de `evaluate_object`).
+fn with_worker_rules<R>(plan: &RulePlan, f: impl FnOnce(&mut [Box<dyn Rule>]) -> R) -> R {
+    THREAD_RULE_SET.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let needs_new = slot
+            .as_ref()
+            .map(|set| set.plan_id != plan.id())
+            .unwrap_or(true);
+        if needs_new {
+            *slot = Some(ThreadRuleSet {
+                plan_id: plan.id(),
+                rules: plan.instantiate(),
+            });
+        }
+        let set = slot.as_mut().expect("rule-set inicializado");
+        f(set.rules.as_mut_slice())
+    })
+}
+
+/// Cierre común de una corrida de archivo: contadores, log y outcome.
+fn finish_file_run(
+    path: &Path,
+    t_start: Instant,
+    objects: usize,
+    issues: Vec<Issue>,
+    limit: Option<String>,
+    cancelled: bool,
+) -> Result<FileRunOutcome> {
     // Si se cortó por cancelación, los hallazgos acumulados se conservan
     // pero el archivo NO cuenta como escaneado con éxito.
     gx_core::stats::count_findings(issues.len());
@@ -215,8 +347,7 @@ pub fn run_file_with_budget(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     tracing::info!(
-        "[ENGINE] {name} — {} objetos | {rules_fired_total} rule-evaluations | {} findings | {elapsed_ms} ms | cancelled={cancelled} limit={limit:?}",
-        objects.len(),
+        "[ENGINE] {name} — {objects} objetos | {} findings | {elapsed_ms} ms | cancelled={cancelled} limit={limit:?}",
         issues.len()
     );
     Ok(FileRunOutcome {
@@ -225,16 +356,6 @@ pub fn run_file_with_budget(
         limit,
         cancelled,
     })
-}
-
-/// Convenience wrapper: load rules from `conn` then evaluate `path`.
-pub fn evaluate_file(
-    path: &Path,
-    conn: &rusqlite::Connection,
-    ctx: &AuditContext,
-) -> Result<(Vec<Issue>, u128)> {
-    let (mut rules, dispatch) = load_rules(conn)?;
-    run_file(&mut rules, &dispatch, path, ctx)
 }
 
 /// Scan `path` with an explicit enabled-rule set (no SQLite involved).
@@ -573,24 +694,68 @@ fn invalid_result(request: &AnalysisRequest, message: String) -> AnalysisResult 
     }
 }
 
+/// Plan de ejecución inmutable (B02): descriptores seleccionados + dispatch.
+///
+/// Se compila UNA vez por sesión/corrida. Las reglas se instancian por job
+/// (`instantiate`) y se resetean por objeto; nunca se construye el catálogo
+/// completo por archivo.
+pub struct RulePlan {
+    /// Identidad de la compilación: los rule-sets thread-local se invalidan
+    /// cuando cambia el plan (B02).
+    id: u64,
+    descriptors: Vec<&'static RuleDescriptor>,
+    dispatch: DispatchPlan,
+}
+
+static NEXT_PLAN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+impl RulePlan {
+    /// Selecciona descriptores concretos habilitados y compila el dispatch.
+    pub fn compile(enabled_ids: &HashSet<String>) -> Result<RulePlan> {
+        let descriptors: Vec<&'static RuleDescriptor> = gx_rules::catalog()
+            .iter()
+            .filter(|descriptor| !descriptor.is_abstract && enabled_ids.contains(descriptor.id))
+            .collect();
+        let dispatch = plan_dispatch_descriptors(&descriptors).map_err(anyhow::Error::msg)?;
+        Ok(RulePlan {
+            id: NEXT_PLAN_ID.fetch_add(1, Ordering::Relaxed),
+            descriptors,
+            dispatch,
+        })
+    }
+
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn rules_len(&self) -> usize {
+        self.descriptors.len()
+    }
+
+    pub fn dispatch(&self) -> &DispatchPlan {
+        &self.dispatch
+    }
+
+    /// Instancia SÓLO las reglas seleccionadas (contadores A02/B02).
+    pub fn instantiate(&self) -> Vec<Box<dyn Rule>> {
+        let rules: Vec<Box<dyn Rule>> = self
+            .descriptors
+            .iter()
+            .map(|descriptor| (descriptor.factory)())
+            .collect();
+        gx_core::stats::count_rule_set_instantiation();
+        gx_core::stats::count_rule_factories(rules.len());
+        rules
+    }
+}
+
 /// Build rules + dispatch plan from an explicit enabled set, without
 /// touching SQLite. Used for deterministic tests, read-only scans and
-/// parallelism.
+/// sequential consumers.
 pub fn build_rules(enabled_ids: &HashSet<String>) -> (Vec<Box<dyn Rule>>, DispatchPlan) {
-    let all = gx_rules::all_rules();
-    let mut rules: Vec<Box<dyn Rule>> = Vec::new();
-    for rule in all {
-        if rule.is_abstract() {
-            continue;
-        }
-        if !enabled_ids.contains(rule.id()) {
-            continue;
-        }
-        rules.push(rule);
-    }
-    gx_core::stats::count_rule_factories(rules.len());
-    let plan = plan_dispatch(&rules).expect("reglas del registry con triggers válidos");
-    (rules, plan)
+    let plan = RulePlan::compile(enabled_ids).expect("reglas del registry con triggers válidos");
+    let rules = plan.instantiate();
+    (rules, plan.dispatch.clone())
 }
 
 /// Evaluate multiple files in parallel (one rule set per thread).
@@ -620,6 +785,26 @@ where
     F: Fn(&Path) -> AuditContext + Sync,
 {
     use rayon::prelude::*;
+
+    // B02: el plan se compila UNA vez; cada job de Rayon instancia sus reglas.
+    let plan = match RulePlan::compile(enabled_ids) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let message = error.to_string();
+            return paths
+                .iter()
+                .map(|p| FileScanOutcome {
+                    path: p.clone(),
+                    issues: Vec::new(),
+                    metrics: AuditMetrics::default(),
+                    error: Some(message.clone()),
+                    limit: None,
+                    cancelled: false,
+                })
+                .collect();
+        }
+    };
+
     let evaluate = || {
         paths
             .par_iter()
@@ -634,9 +819,8 @@ where
                         cancelled: true,
                     }
                 } else {
-                    let (mut rules, dispatch) = build_rules(enabled_ids);
                     let ctx = ctx_factory(p);
-                    match run_file_with_budget(&mut rules, &dispatch, p, &ctx, budget, cancel) {
+                    match run_file_planned(&plan, p, &ctx, budget, cancel) {
                         Ok(run) => {
                             let metrics = AuditMetrics::from_issues(&run.issues);
                             FileScanOutcome {
