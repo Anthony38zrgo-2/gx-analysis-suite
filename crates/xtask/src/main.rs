@@ -811,6 +811,14 @@ fn check_gates(manifest: &CorpusManifest, run: &RunReport, rule_count: usize) ->
                 stats.objects_extracted
             );
         }
+        // D01: con packs habilitados (el bench corre todas las concretas) el
+        // modelo semántico se calcula UNA vez por objeto.
+        if stats.fact_model_requests as usize != expected {
+            bail!(
+                "gate de hechos: esperados {expected} modelos y hubo {}",
+                stats.fact_model_requests
+            );
+        }
     }
     if let Some(expected) = manifest.expected_xml_parses {
         if stats.parser_invocations as usize != expected {

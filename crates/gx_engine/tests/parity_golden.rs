@@ -196,17 +196,34 @@ fn concrete_rules_are_covered_by_manifest() {
         .map(|e| e["rule_id"].as_str().unwrap().to_string())
         .collect();
 
-    let registry: Vec<(String, bool)> = gx_rules::all_rules()
+    // D01: el manifest legacy cubre las reglas de LÍNEA; los packs de objeto
+    // (opt-in) se declaran aparte y no forman parte del baseline Python.
+    use gx_rules::base::Scope;
+    let line_rules: Vec<String> = gx_rules::all_rules()
         .iter()
-        .map(|r| (r.id().to_string(), r.is_abstract()))
+        .filter(|r| !r.is_abstract() && r.capability().scope == Scope::Line)
+        .map(|r| r.id().to_string())
         .collect();
-    let concrete: Vec<&(String, bool)> = registry.iter().filter(|(_, a)| !a).collect();
-    assert_eq!(concrete.len(), 24, "el registry debe tener 24 concretas");
+    assert_eq!(
+        line_rules.len(),
+        24,
+        "el registry debe tener 24 reglas de línea"
+    );
 
-    for (id, _) in &concrete {
+    for id in &line_rules {
         assert!(
             manifest_ids.contains(id),
             "la regla {id} no figura en rule_manifest.json"
         );
     }
+
+    let packs: Vec<String> = gx_rules::all_rules()
+        .iter()
+        .filter(|r| !r.is_abstract() && r.capability().scope == Scope::Object)
+        .map(|r| r.id().to_string())
+        .collect();
+    assert!(
+        packs.contains(&"GX.2.7.5".to_string()) && packs.contains(&"GX.SEC.1".to_string()),
+        "los packs D01/D03 deben estar en el catálogo: {packs:?}"
+    );
 }

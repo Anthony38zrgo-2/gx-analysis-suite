@@ -379,6 +379,9 @@ mod tests {
                 member: "PkgDemo/ProcMalo.xml".to_string(),
                 package: "PkgDemo".to_string(),
             }),
+            category: None,
+            confidence: None,
+            cwe: None,
         }
     }
 
@@ -399,6 +402,8 @@ mod tests {
             verdict: QgVerdict::Reject,
             coverage: Default::default(),
             completion: Default::default(),
+            pack_coverage: Vec::new(),
+            security: None,
         }
     }
 

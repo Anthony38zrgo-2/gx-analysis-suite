@@ -10,13 +10,15 @@ use crate::{Result, StorageError};
 const MIGRATION_V1: &str = include_str!("../../../migrations/V001__initial_schema.sql");
 const MIGRATION_V2: &str = include_str!("../../../migrations/V002__seed_rules_and_settings.sql");
 const MIGRATION_V3: &str = include_str!("../../../migrations/V003__audit_object_identity.sql");
+const MIGRATION_V4: &str = include_str!("../../../migrations/V004__audit_security_metadata.sql");
 
-/// Todas las migraciones, en orden (V001→V003).
+/// Todas las migraciones, en orden (V001→V004).
 pub fn all_migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_V1),
         M::up(MIGRATION_V2),
         M::up(MIGRATION_V3),
+        M::up(MIGRATION_V4),
     ])
 }
 
@@ -99,8 +101,8 @@ pub fn get_pool() -> Result<SqlitePool> {
 mod tests {
     use super::*;
 
-    /// GX-009: una base fresca tiene 30 filas de catálogo (24 concretas) y
-    /// exactamente 15 reglas concretas habilitadas.
+    /// GX-009/D01: una base fresca tiene 32 filas de catálogo (26 concretas:
+    /// 24 reglas de línea + 2 packs opt-in) y exactamente 15 habilitadas.
     #[test]
     fn fresh_db_has_full_catalog() {
         let conn = init_memory_db().unwrap();
@@ -111,7 +113,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(concrete, 24);
+        assert_eq!(concrete, 26);
         let enabled: usize = conn
             .query_row(
                 "SELECT COUNT(*) FROM rules WHERE is_abstract = 0 AND enabled = 1",
@@ -182,6 +184,10 @@ mod tests {
             .prepare("SELECT verdict FROM audit_runs LIMIT 0")
             .is_ok();
         assert!(has_verdict, "las columnas V003 deben existir");
+        let has_security: bool = conn
+            .prepare("SELECT category, confidence, cwe FROM audit_issues LIMIT 0")
+            .is_ok();
+        assert!(has_security, "las columnas V004 (D03) deben existir");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

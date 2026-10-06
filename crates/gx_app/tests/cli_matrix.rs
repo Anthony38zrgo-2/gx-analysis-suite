@@ -316,6 +316,44 @@ fn scan_ndjson_streams_findings_and_summary() {
     assert_eq!(summary["verdict"], "reject");
 }
 
+/// D03: el pack de seguridad reporta categoría/CWE con evidencia REDACTADA y
+/// su veredicto no se diluye por la política de estilo.
+#[test]
+fn scan_security_pack_redacts_and_rejects() {
+    let dir = std::env::temp_dir().join("gx_cli_security_pack");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("secrets.txt");
+    std::fs::write(&file, "&password = 'S3cr3t-Value!'\n").unwrap();
+
+    let out = gx(&[
+        "scan",
+        "--file",
+        file.to_str().unwrap(),
+        "--enable",
+        "GX.SEC.1",
+        "--error-pct",
+        "100",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(out.code, 1, "stderr: {}", out.stderr);
+    assert!(
+        !out.stdout.contains("S3cr3t-Value!"),
+        "el secreto no puede aparecer en la salida"
+    );
+    let json: Value = serde_json::from_str(&out.stdout).unwrap();
+    let issue = &json["findings"][0];
+    assert_eq!(issue["rule_id"], "GX.SEC.1");
+    assert_eq!(issue["category"], "security");
+    assert_eq!(issue["cwe"], 798);
+    assert!(issue["line_content"].as_str().unwrap().contains("***"));
+    assert_eq!(json["security"]["errors"], 1);
+    assert_eq!(json["verdict"], "reject", "100% de estilo no diluye");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Filtros de reglas: --enable domina al set por defecto.
 #[test]
 fn enable_filter_selects_rules() {
@@ -390,7 +428,7 @@ fn rules_list_from_csv() {
     let out = gx(&["rules", "list", "--rules-csv", csv.to_str().unwrap()]);
     assert_eq!(out.code, 0);
     assert!(out.stdout.contains("GX.2.6"));
-    assert!(out.stdout.contains("24 reglas operativas"));
+    assert!(out.stdout.contains("26 reglas operativas"));
 }
 
 /// XPZ real empaquetado como RAR: se lintea con identidad de objeto real.

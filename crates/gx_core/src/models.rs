@@ -117,6 +117,16 @@ pub struct Issue {
     /// Identidad del objeto Genexus origen (stamped por el runtime; GX-006).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object: Option<ObjectRef>,
+    /// Categoría del hallazgo (D03): "security" se evalúa aparte de la
+    /// política de estilo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Confianza de la evidencia (D03): high/medium/low.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<String>,
+    /// CWE asociado cuando está justificado (D03).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwe: Option<u32>,
 }
 
 /// Métricas consolidadas del análisis.
@@ -211,10 +221,11 @@ impl QgPolicy {
 }
 
 /// Veredicto del quality gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum QgVerdict {
     /// Dentro de la política.
+    #[default]
     Pass,
     /// Fuera de la política (rechazado).
     Reject,
@@ -277,6 +288,26 @@ pub enum ScanCompletion {
     Failed,
 }
 
+/// Cobertura de un pack semántico/seguridad (D01): qué se analizó, qué se
+/// omitió por falta de hechos y cuántos hallazgos aportó.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PackCoverage {
+    pub id: String,
+    pub version: String,
+    pub objects_analyzed: usize,
+    pub skipped_unsupported: usize,
+    pub findings: usize,
+}
+
+/// Resumen de seguridad separado de la política de estilo (D03): un hallazgo
+/// de seguridad no se diluye por el porcentaje de hallazgos de estilo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SecuritySummary {
+    pub findings: usize,
+    pub errors: usize,
+    pub verdict: QgVerdict,
+}
+
 /// Resultado completo de un análisis (GX-010): hallazgos en orden
 /// determinista, métricas, fallos y veredicto con su política.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -299,6 +330,12 @@ pub struct AnalysisResult {
     /// Completitud del análisis: complete/partial/cancelled/failed (A04).
     #[serde(default)]
     pub completion: ScanCompletion,
+    /// Cobertura por pack semántico/seguridad habilitado (D01).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pack_coverage: Vec<PackCoverage>,
+    /// Resumen de seguridad (D03), separado del veredicto de estilo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<SecuritySummary>,
 }
 
 /// Línea preprocesada, compartida por todas las reglas (B01).
@@ -442,6 +479,9 @@ mod tests {
                 description: "".into(),
                 file_path: PathBuf::from("x"),
                 object: None,
+                category: None,
+                confidence: None,
+                cwe: None,
             },
             Issue {
                 rule_id: "GX.2".into(),
@@ -451,6 +491,9 @@ mod tests {
                 description: "".into(),
                 file_path: PathBuf::from("x"),
                 object: None,
+                category: None,
+                confidence: None,
+                cwe: None,
             },
             Issue {
                 rule_id: "GX.3".into(),
@@ -460,6 +503,9 @@ mod tests {
                 description: "".into(),
                 file_path: PathBuf::from("x"),
                 object: None,
+                category: None,
+                confidence: None,
+                cwe: None,
             },
             Issue {
                 rule_id: "GX.4".into(),
@@ -469,6 +515,9 @@ mod tests {
                 description: "".into(),
                 file_path: PathBuf::from("x"),
                 object: None,
+                category: None,
+                confidence: None,
+                cwe: None,
             },
         ];
         let m = AuditMetrics::from_issues(&issues);

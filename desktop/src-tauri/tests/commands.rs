@@ -323,6 +323,9 @@ fn history_keyset_pagination_and_invalid_handles() {
                 description: "desc".to_string(),
                 file_path: PathBuf::from("x.xpz"),
                 object: None,
+                category: None,
+                confidence: None,
+                cwe: None,
             })
             .collect();
         audit_dao::persist_run(&mut conn, &run, &issues).unwrap();

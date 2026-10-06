@@ -19,6 +19,28 @@ export interface Issue {
   description: string;
   file_path: string;
   object?: ObjectRef;
+  /** D03: "security" se evalúa aparte de la política de estilo. */
+  category?: string;
+  /** D03: high/medium/low. */
+  confidence?: string;
+  /** D03: CWE cuando está justificado. */
+  cwe?: number;
+}
+
+/** D01: cobertura de un pack semántico/seguridad. */
+export interface PackCoverage {
+  id: string;
+  version: string;
+  objects_analyzed: number;
+  skipped_unsupported: number;
+  findings: number;
+}
+
+/** D03: resumen de seguridad separado del veredicto de estilo. */
+export interface SecuritySummary {
+  findings: number;
+  errors: number;
+  verdict: QgVerdict;
 }
 
 export interface AuditMetrics {
@@ -69,6 +91,8 @@ export interface AnalysisResult {
   verdict: QgVerdict;
   coverage?: ScanCoverage;
   completion?: ScanCompletion;
+  pack_coverage?: PackCoverage[];
+  security?: SecuritySummary;
 }
 
 /** C01: cabecera de una sesión de resultados; los findings se piden por
@@ -86,6 +110,8 @@ export interface ScanSummary {
   completion: ScanCompletion;
   findings_total: number;
   history_error: string | null;
+  pack_coverage?: PackCoverage[];
+  security?: SecuritySummary;
 }
 
 /** C01/C03: página de findings con filtros resueltos en Rust. */

@@ -12,6 +12,66 @@
 use std::path::{Path, PathBuf};
 
 pub use gx_core::models::{AuditContext, Issue, ParsedLine, Severity, SourceLine};
+pub use gx_core::semantics::{FactSet, SemanticModel, Token};
+
+/// Alcance del análisis declarado por una regla/pack (D01).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scope {
+    /// Regla de línea (comportamiento histórico).
+    #[default]
+    Line,
+    /// Análisis por objeto que requiere hechos compartidos.
+    Object,
+}
+
+/// Clase de costo declarada (D01): permite perfiles opt-in profundos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Cost {
+    #[default]
+    Cheap,
+    Moderate,
+    Deep,
+}
+
+/// Capacidad declarada: alcance + hechos requeridos + costo (D01).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Capability {
+    pub scope: Scope,
+    pub facts: FactSet,
+    pub cost: Cost,
+}
+
+impl Capability {
+    pub const fn line() -> Self {
+        Capability {
+            scope: Scope::Line,
+            facts: FactSet::NONE,
+            cost: Cost::Cheap,
+        }
+    }
+}
+
+/// Hechos compartidos calculados UNA vez por objeto y sólo si un pack
+/// seleccionado los requiere (D01/D02).
+pub struct ObjectFacts<'a> {
+    /// Texto crudo del objeto (evidencia y patrones léxicos).
+    pub text: &'a str,
+    pub tokens: Option<&'a [Token]>,
+    pub model: Option<&'a SemanticModel>,
+}
+
+impl ObjectFacts<'_> {
+    /// `true` si los hechos requeridos están disponibles.
+    pub fn has(&self, facts: FactSet) -> bool {
+        if facts.needs_model() {
+            self.model.is_some()
+        } else if facts.needs_tokens() {
+            self.tokens.is_some()
+        } else {
+            true
+        }
+    }
+}
 
 /// Anything that exposes a line number + content (both `ParsedLine` and
 /// `SourceLine` implement it), so `make_issue` can be called with either.
@@ -56,6 +116,9 @@ pub fn make_issue(
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("Unknown")),
         object: None,
+        category: None,
+        confidence: None,
+        cwe: None,
     }
 }
 
@@ -71,6 +134,8 @@ pub fn make_issue(
 pub enum DispatchRoute {
     AllLines,
     Tokens(&'static [&'static str]),
+    /// Pack de objeto (D01): nunca se despacha por línea.
+    Object,
 }
 
 /// Descriptor inmutable de una regla (B02).
@@ -79,19 +144,30 @@ pub enum DispatchRoute {
 /// y sólo se instancian (vía `factory`) las reglas seleccionadas.
 pub struct RuleDescriptor {
     pub id: &'static str,
+    /// Versión estable de la regla/pack (D01), parte de la clave de caché.
+    pub version: &'static str,
     pub name: &'static str,
     pub severity: Severity,
     pub description: &'static str,
+    /// Categoría declarada ("policy", "security", …) (D01/D03).
+    pub category: &'static str,
+    /// Tipos de objeto soportados; vacío = cualquiera (D01).
+    pub object_types: &'static [&'static str],
     pub triggers: &'static [&'static str],
     pub is_abstract: bool,
-    /// `Some(tokens)` ⇒ ruta `Tokens`; `None` ⇒ `AllLines`.
+    /// `Some(tokens)` ⇒ ruta `Tokens`; `None` ⇒ `AllLines`; `Object` ⇒ pack.
     pub tokens_route: Option<&'static [&'static str]>,
+    pub is_object_route: bool,
+    pub capability: Capability,
     pub factory: fn() -> Box<dyn Rule>,
 }
 
 impl RuleDescriptor {
     /// Ruta de despacho declarada por la regla.
     pub fn dispatch_route(&self) -> DispatchRoute {
+        if self.is_object_route {
+            return DispatchRoute::Object;
+        }
         match self.tokens_route {
             Some(tokens) => DispatchRoute::Tokens(tokens),
             None => DispatchRoute::AllLines,
@@ -102,6 +178,10 @@ impl RuleDescriptor {
 /// The core rule contract.
 pub trait Rule: Send + Sync {
     fn id(&self) -> &'static str;
+    /// Versión estable de la regla/pack (D01).
+    fn version(&self) -> &'static str {
+        "1.0"
+    }
     fn name(&self) -> &'static str;
     fn severity(&self) -> Severity;
     fn description(&self) -> &'static str;
@@ -119,8 +199,16 @@ pub trait Rule: Send + Sync {
     fn is_abstract(&self) -> bool {
         false
     }
+    /// Capacidad declarada (D01): hechos requeridos y costo.
+    fn capability(&self) -> Capability {
+        Capability::line()
+    }
     fn reset(&mut self, file: &Path);
     fn evaluate(&mut self, line: &ParsedLine<'_>, ctx: &AuditContext) -> Vec<Issue>;
+    /// Análisis por objeto (D01/D02): sólo lo implementan los packs.
+    fn analyze_object(&mut self, _facts: &ObjectFacts<'_>, _ctx: &AuditContext) -> Vec<Issue> {
+        vec![]
+    }
     fn finalize(&mut self, _ctx: &AuditContext) -> Vec<Issue> {
         vec![]
     }
@@ -132,11 +220,30 @@ pub trait Rule: Send + Sync {
 /// `|me: &mut Self, file: &Path| -> ()`, `|me, line, ctx| -> Vec<Issue>`, etc.
 #[macro_export]
 macro_rules! define_rule {
-    // Rutas internas del descriptor (B02).
+    // Rutas internas del descriptor (B02/D01).
     (@route [$($trig:literal),*]) => { ::core::option::Option::None };
     (@route [$($trig:literal),*] tokens) => {
         ::core::option::Option::Some(&[$($trig),*])
     };
+    (@route [$($trig:literal),*] object) => { ::core::option::Option::None };
+    (@version $v:literal) => { $v };
+    (@version) => { "1.0" };
+    (@category $c:literal) => { $c };
+    (@category) => { "policy" };
+    (@scope line) => { $crate::base::Scope::Line };
+    (@scope object) => { $crate::base::Scope::Object };
+    (@scope) => { $crate::base::Scope::Line };
+    (@cost cheap) => { $crate::base::Cost::Cheap };
+    (@cost moderate) => { $crate::base::Cost::Moderate };
+    (@cost deep) => { $crate::base::Cost::Deep };
+    (@cost) => { $crate::base::Cost::Cheap };
+    (@fact tokens) => { $crate::base::FactSet::TOKENS };
+    (@fact syntax) => { $crate::base::FactSet::SYNTAX };
+    (@fact symbols) => { $crate::base::FactSet::SYMBOLS };
+    (@fact def_use) => { $crate::base::FactSet::DEF_USE };
+    (@is_object object) => { true };
+    (@is_object $other:ident) => { false };
+    (@is_object) => { false };
 
     (
         id = $rid:literal,
@@ -146,10 +253,17 @@ macro_rules! define_rule {
         triggers = [$($trig:literal),* $(,)?],
         abstract = $abs:expr
         $(, route = $route:ident)?
+        $(, version = $version:literal)?
+        $(, category = $cat:literal)?
+        $(, scope = $scope:ident)?
+        $(, facts = [$($fact:ident),* $(,)?])?
+        $(, cost = $cost:ident)?
+        $(, object_types = [$($otype:literal),* $(,)?])?
         ,
         struct $name:ident { $($field:ident : $fty:ty),* $(,)? },
         reset = $reset:expr,
         evaluate = $eval:expr
+        $(, analyze = $analyze:expr)?
         $(, finalize = $fin:expr)?
         $(,)?
     ) => {
@@ -168,22 +282,35 @@ macro_rules! define_rule {
                 }
             }
 
-            /// Descriptor estático para el catálogo (B02).
+            /// Descriptor estático para el catálogo (B02/D01).
             pub const DESCRIPTOR: $crate::base::RuleDescriptor =
                 $crate::base::RuleDescriptor {
                     id: $rid,
+                    version: $crate::define_rule!(@version $($version)?),
                     name: $rname,
                     severity: $sev,
                     description: $desc,
+                    category: $crate::define_rule!(@category $($cat)?),
+                    object_types: &[$($($otype),*)?],
                     triggers: &[$($trig),*],
                     is_abstract: $abs,
                     tokens_route: $crate::define_rule!(@route [$($trig),*] $($route)?),
+                    is_object_route: $crate::define_rule!(@is_object $($route)?),
+                    capability: $crate::base::Capability {
+                        scope: $crate::define_rule!(@scope $($scope)?),
+                        facts: $crate::base::FactSet::NONE
+                            $($(.union($crate::define_rule!(@fact $fact)))*)?,
+                        cost: $crate::define_rule!(@cost $($cost)?),
+                    },
                     factory: || ::std::boxed::Box::new(<$name>::new()),
                 };
         }
 
         impl $crate::base::Rule for $name {
             fn id(&self) -> &'static str { $rid }
+            fn version(&self) -> &'static str {
+                $crate::define_rule!(@version $($version)?)
+            }
             fn name(&self) -> &'static str { $rname }
             fn severity(&self) -> $crate::base::Severity { $sev }
             fn description(&self) -> &'static str { $desc }
@@ -194,11 +321,18 @@ macro_rules! define_rule {
                     if stringify!($route) == "tokens" {
                         return $crate::base::DispatchRoute::Tokens(self.triggers());
                     }
+                    if stringify!($route) == "object" {
+                        return $crate::base::DispatchRoute::Object;
+                    }
                 )?
                 $crate::base::DispatchRoute::AllLines
             }
 
             fn is_abstract(&self) -> bool { $abs }
+
+            fn capability(&self) -> $crate::base::Capability {
+                <$name>::DESCRIPTOR.capability
+            }
 
             fn reset(&mut self, file: &::std::path::Path) {
                 self.current_file = Some(file.to_path_buf());
@@ -208,6 +342,16 @@ macro_rules! define_rule {
             #[allow(unused_variables)]
             fn evaluate(&mut self, line: &$crate::base::ParsedLine<'_>, ctx: &$crate::base::AuditContext) -> ::std::vec::Vec<$crate::base::Issue> {
                 ($eval)(self, line, ctx)
+            }
+
+            #[allow(unused_variables, unreachable_code)]
+            fn analyze_object(
+                &mut self,
+                facts: &$crate::base::ObjectFacts<'_>,
+                ctx: &$crate::base::AuditContext,
+            ) -> ::std::vec::Vec<$crate::base::Issue> {
+                $( return ($analyze)(self, facts, ctx); )?
+                ::std::vec::Vec::new()
             }
 
             #[allow(unused_variables, unreachable_code)]

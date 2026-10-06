@@ -17,8 +17,8 @@ use tauri::State;
 
 use gx_core::budget::ExecutionBudget;
 use gx_core::models::{
-    AnalysisRequest, AnalysisResult, AuditMetrics, Issue, QgPolicy, QgVerdict, ScanCompletion,
-    ScanCoverage, ScanFailure, SourceObject,
+    AnalysisRequest, AnalysisResult, AuditMetrics, Issue, PackCoverage, QgPolicy, QgVerdict,
+    ScanCompletion, ScanCoverage, ScanFailure, SecuritySummary, SourceObject,
 };
 use gx_engine::runtime::{self, FileProgress, FileProgressState};
 use gx_sources::filesystem::is_source_extension;
@@ -451,6 +451,12 @@ pub struct ScanSummaryDto {
     pub findings_total: usize,
     /// Fallo de persistencia: el resultado del scan NO se descarta (C01).
     pub history_error: Option<String>,
+    /// Cobertura por pack semántico/seguridad habilitado (D01).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pack_coverage: Vec<PackCoverage>,
+    /// Resumen de seguridad separado de la política de estilo (D03).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<SecuritySummary>,
 }
 
 impl ScanSummaryDto {
@@ -472,6 +478,8 @@ impl ScanSummaryDto {
             completion: result.completion,
             findings_total: result.findings.len(),
             history_error,
+            pack_coverage: result.pack_coverage.clone(),
+            security: result.security.clone(),
         }
     }
 }

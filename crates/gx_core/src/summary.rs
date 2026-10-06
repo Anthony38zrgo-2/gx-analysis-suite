@@ -34,6 +34,15 @@ pub fn text_summary(result: &AnalysisResult) -> String {
             issue.description
         );
     }
+    if let Some(security) = &result.security {
+        let _ = writeln!(
+            out,
+            "[gx] seguridad: {} hallazgo(s), {} error(es) — veredicto {} (CWE/patrones)",
+            security.findings,
+            security.errors,
+            verdict_label(security.verdict)
+        );
+    }
     let _ = writeln!(
         out,
         "[gx] quality gate: {} ({})",
@@ -92,6 +101,9 @@ mod tests {
                 description: "desc".to_string(),
                 file_path: PathBuf::from("x.txt"),
                 object: None,
+                category: None,
+                confidence: None,
+                cwe: None,
             }],
             metrics: AuditMetrics {
                 total_findings: 1,
@@ -107,6 +119,8 @@ mod tests {
             verdict: QgVerdict::Reject,
             coverage: Default::default(),
             completion: Default::default(),
+            pack_coverage: Vec::new(),
+            security: None,
         }
     }
 

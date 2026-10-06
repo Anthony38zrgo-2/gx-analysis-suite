@@ -566,3 +566,59 @@ All probes above are now regression tests.
   MSRV 1.89 check and `check-boundaries`: clean.
 - Bench gates (`small-files`) still pass; engine behavior is unchanged by
   Phase C (all changes are adapter/persistence/frontend).
+
+## 11. Implementation log — Phase D (D01–D04)
+
+**D01 — Capability-based packs.**
+- `RuleDescriptor` now carries stable version, category, supported object
+  types, dispatch route and a `Capability` (scope + required `FactSet` +
+  cost). The `define_rule!` macro accepts the new metadata with defaults, so
+  the 24 line rules keep their behavior and the legacy manifest contract.
+- `Rule::analyze_object` + `ObjectFacts` add object-level analysis; object
+  rules use the new `route = object` and never enter the per-line dispatch.
+- `RulePlan` computes the union of required facts once; `evaluate_object`
+  builds the semantic model only when a selected pack asks for it, exactly
+  once per object, and reports per-pack coverage
+  (`AnalysisResult.pack_coverage`). The default 15-rule profile keeps an empty
+  fact union (zero semantic work), and `GX.SEC.1`/`GX.2.7.5` are disabled by
+  default in the seeded catalog (26 concrete rules: 24 line + 2 packs).
+
+**D02 — Semantic model and local dataflow.**
+- `gx_core::semantics` implements a tokenizer and a minimal statement model
+  (blocks with nesting/parents, assignments, conditions, calls, parm) with
+  explicit coverage (`unclosed_blocks`, `malformed_lines`, `complete`).
+- Symbol binding and local def-use derive variable reads/writes once,
+  distinguishing assignment from comparison (`if &x = 1` is a read) and
+  handling read-modify-write (`&x = &x + 1`) and Out/Inout parameters (not
+  dead). `GX.2.7.5` (dead store) consumes these facts and skips objects with
+  incomplete coverage instead of guessing; the legacy GX.2.7.3/2.7.4 line
+  heuristics remain as adjudicated baseline.
+
+**D03 — Bounded security profile.**
+- `GX.SEC.1` reports credentials embedded in literals with
+  `category = "security"`, `confidence = "high"` and CWE-798; the evidence is
+  redacted (`'***'`) in `line_content` and never appears in JSON/CLI output.
+- `AnalysisResult.security` separates the security verdict from the style
+  policy: a security error forces `reject` even when the percentage policy
+  would pass, and `SecuritySummary` is surfaced by the CLI summary and the
+  desktop `ScanSummary`. Migration V004 persists category/confidence/CWE in
+  history.
+
+**D04 — Bounded fact cache.**
+- `FactCache` keys facts by source content + parser version + engine version +
+  required facts, is bounded by entries with eviction, and reports cold/warm
+  hits and evictions through `gx_core::stats` (visible in the benchmark JSON).
+- The bench gate now also asserts `fact_model_requests == objects` when a pack
+  is enabled, so the "one fact per object" contract is checked in CI without
+  timing.
+
+**Verification (Phase D).**
+- `cargo test --workspace`: 150 tests passed; desktop workspace: 15 + contract
+  test; `npm run build` (vue-tsc + vite): passed; clippy/fmt clean in both
+  workspaces; MSRV 1.89 and `check-boundaries`: clean.
+- New fixtures/cases: semantics unit tests (blocks, params, def-use, cache),
+  `phase_d.rs` (facts once per object, cold/warm cache, redaction, separated
+  security verdict, incomplete coverage), positive/negative rule cases for
+  both packs and a CLI redaction test.
+- Global project-wide taint/graph limits (D04 deep profile) remain opt-in and
+  are not implemented; no global dataflow claims are made.

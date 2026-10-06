@@ -140,8 +140,9 @@ fn insert_issues_in_tx(conn: &Connection, run_id: i64, issues: &[Issue]) -> Resu
     let mut stmt = conn.prepare_cached(
         "INSERT INTO audit_issues \
          (audit_run_id, rule_id, severity, line_number, line_content, description, file_path, \
-          object_id, object_type, object_package, object_member, object_container) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+          object_id, object_type, object_package, object_member, object_container, \
+          category, confidence, cwe) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
     )?;
     for issue in issues {
         let (object_id, object_type, object_package, object_member, object_container) =
@@ -168,6 +169,9 @@ fn insert_issues_in_tx(conn: &Connection, run_id: i64, issues: &[Issue]) -> Resu
             object_package,
             object_member,
             object_container,
+            issue.category,
+            issue.confidence,
+            issue.cwe.map(|cwe| cwe as i64),
         ])?;
     }
     Ok(())
@@ -236,6 +240,9 @@ fn row_to_issue(r: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
     let object_package: Option<String> = r.get(8)?;
     let object_member: Option<String> = r.get(9)?;
     let object_container: Option<String> = r.get(10)?;
+    let category: Option<String> = r.get(11)?;
+    let confidence: Option<String> = r.get(12)?;
+    let cwe: Option<i64> = r.get(13)?;
 
     let object = object_id.map(|id| gx_core::models::ObjectRef {
         id,
@@ -256,12 +263,15 @@ fn row_to_issue(r: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
             _ => gx_core::models::Severity::Info,
         },
         object,
+        category,
+        confidence,
+        cwe: cwe.map(|value| value as u32),
     })
 }
 
 const ISSUE_COLUMNS: &str = "ai.rule_id, ai.line_number, ai.line_content, ai.description, \
      ai.file_path, ai.severity, ai.object_id, ai.object_type, ai.object_package, \
-     ai.object_member, ai.object_container, ai.id";
+     ai.object_member, ai.object_container, ai.category, ai.confidence, ai.cwe, ai.id";
 
 /// Issues for a given run, ordered by severity.
 ///
@@ -303,8 +313,8 @@ pub fn get_issues_page(
             let rows = stmt.query_map(
                 rusqlite::params![run_id, cursor.rank as i64, cursor.id, fetch],
                 |r| {
-                    let id: i64 = r.get(11)?;
-                    let rank: i64 = r.get(12)?;
+                    let id: i64 = r.get(14)?;
+                    let rank: i64 = r.get(15)?;
                     Ok((row_to_issue(r)?, rank as u8, id))
                 },
             )?;
@@ -319,8 +329,8 @@ pub fn get_issues_page(
                  ORDER BY {ISSUE_RANK_SQL}, ai.id LIMIT ?2"
             ))?;
             let rows = stmt.query_map(rusqlite::params![run_id, fetch], |r| {
-                let id: i64 = r.get(11)?;
-                let rank: i64 = r.get(12)?;
+                let id: i64 = r.get(14)?;
+                let rank: i64 = r.get(15)?;
                 Ok((row_to_issue(r)?, rank as u8, id))
             })?;
             for row in rows {
@@ -465,6 +475,9 @@ mod tests {
                 member: "PkgDemo/ProcMalo.xml".to_string(),
                 package: "PkgDemo".to_string(),
             }),
+            category: None,
+            confidence: None,
+            cwe: None,
         }
     }
 
@@ -499,6 +512,9 @@ mod tests {
             description: format!("desc {rule_id}"),
             file_path: std::path::PathBuf::from("sample.xpz"),
             object: None,
+            category: None,
+            confidence: None,
+            cwe: None,
         }
     }
 

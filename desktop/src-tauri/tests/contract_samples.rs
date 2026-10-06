@@ -13,8 +13,8 @@
 use std::path::{Path, PathBuf};
 
 use gx_core::models::{
-    AnalysisRequest, AnalysisResult, AuditMetrics, Issue, ObjectRef, QgPolicy, QgVerdict,
-    ScanCompletion, ScanCoverage, Severity,
+    AnalysisRequest, AnalysisResult, AuditMetrics, Issue, ObjectRef, PackCoverage, QgPolicy,
+    QgVerdict, ScanCompletion, ScanCoverage, SecuritySummary, Severity,
 };
 use gx_linter_desktop_lib::commands::{
     FindingsPageDto, HistoryIssuesPageDto, ObjectSegmentDto, ObjectWindowDto, ScanSummaryDto,
@@ -51,6 +51,32 @@ fn sample_issue() -> Issue {
             member: "PkgDemo/ProcMalo.xml".to_string(),
             package: "PkgDemo".to_string(),
         }),
+        category: None,
+        confidence: None,
+        cwe: None,
+    }
+}
+
+/// D03: hallazgo de seguridad con categoría/confianza/CWE y evidencia
+/// redactada.
+fn sample_security_issue() -> Issue {
+    Issue {
+        rule_id: "GX.SEC.1".to_string(),
+        severity: Severity::Error,
+        line_number: 12,
+        line_content: "&password = '***'".to_string(),
+        description: "Se detectó un valor sensible embebido (CWE-798).".to_string(),
+        file_path: PathBuf::from(CONTAINER),
+        object: Some(ObjectRef {
+            id: "ProcMalo".to_string(),
+            object_type: "Procedure".to_string(),
+            container_path: CONTAINER.to_string(),
+            member: "PkgDemo/ProcMalo.xml".to_string(),
+            package: "PkgDemo".to_string(),
+        }),
+        category: Some("security".to_string()),
+        confidence: Some("high".to_string()),
+        cwe: Some(798),
     }
 }
 
@@ -59,10 +85,10 @@ fn sample_result() -> AnalysisResult {
         schema_version: 1,
         request: sample_request(),
         scanned_files: 1,
-        findings: vec![sample_issue()],
+        findings: vec![sample_issue(), sample_security_issue()],
         metrics: AuditMetrics {
-            total_findings: 1,
-            errors: 1,
+            total_findings: 2,
+            errors: 2,
             warnings: 0,
             info: 0,
         },
@@ -80,6 +106,18 @@ fn sample_result() -> AnalysisResult {
             source_free_inputs: 0,
         },
         completion: ScanCompletion::Complete,
+        pack_coverage: vec![PackCoverage {
+            id: "GX.SEC.1".to_string(),
+            version: "1.0".to_string(),
+            objects_analyzed: 1,
+            skipped_unsupported: 0,
+            findings: 1,
+        }],
+        security: Some(SecuritySummary {
+            findings: 1,
+            errors: 1,
+            verdict: QgVerdict::Reject,
+        }),
     }
 }
 
@@ -98,6 +136,8 @@ fn sample_summary() -> ScanSummaryDto {
         completion: result.completion,
         findings_total: result.findings.len(),
         history_error: None,
+        pack_coverage: result.pack_coverage.clone(),
+        security: result.security.clone(),
     }
 }
 

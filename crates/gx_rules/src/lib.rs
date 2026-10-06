@@ -51,6 +51,8 @@ pub static CATALOG: &[RuleDescriptor] = &[
     rules::rule_gx_2_7_2::RuleGx2_7_2::DESCRIPTOR,
     rules::rule_gx_2_7_3::RuleGx2_7_3::DESCRIPTOR,
     rules::rule_gx_2_7_4::RuleGx2_7_4::DESCRIPTOR,
+    rules::rule_gx_2_7_5::RuleGx2_7_5::DESCRIPTOR,
+    rules::rule_gx_sec_1::RuleGxSec1::DESCRIPTOR,
 ];
 
 /// Metadatos del catálogo (sin instanciar ninguna regla).

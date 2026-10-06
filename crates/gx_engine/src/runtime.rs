@@ -9,11 +9,12 @@ use anyhow::Result;
 use gx_core::budget::ExecutionBudget;
 use gx_core::lexical::{contains_ignore_ascii_case, mask_block_comments};
 use gx_core::models::{
-    AnalysisRequest, AnalysisResult, AuditContext, AuditMetrics, Issue, ParsedLine, QgVerdict,
-    ScanCompletion, ScanCoverage, ScanFailure,
+    AnalysisRequest, AnalysisResult, AuditContext, AuditMetrics, Issue, PackCoverage, ParsedLine,
+    QgVerdict, ScanCompletion, ScanCoverage, ScanFailure, SecuritySummary,
 };
+use gx_core::semantics::{FactSet, GLOBAL_FACT_CACHE};
 use gx_core::validation::{validate_request_shape, ValidationError};
-use gx_rules::base::{Rule, RuleDescriptor};
+use gx_rules::base::{ObjectFacts, Rule, RuleDescriptor};
 use gx_sources::filesystem::{discover_source_files_with_cancel, is_source_extension};
 
 use crate::dispatch::{collect_candidate_rules_into, plan_dispatch_descriptors, DispatchPlan};
@@ -43,7 +44,10 @@ pub fn run_file(
     ctx: &AuditContext,
 ) -> Result<(Vec<Issue>, u128)> {
     let budget = ExecutionBudget::default();
-    let outcome = run_file_with_budget(rules, dispatch, path, ctx, &budget, None)?;
+    let facts_union = rules.iter().fold(FactSet::NONE, |acc, rule| {
+        acc.union(rule.capability().facts)
+    });
+    let outcome = run_file_with_budget(rules, dispatch, facts_union, path, ctx, &budget, None)?;
     Ok((outcome.issues, outcome.elapsed_ms))
 }
 
@@ -56,24 +60,29 @@ pub struct FileRunOutcome {
     pub limit: Option<String>,
     /// Cancelación solicitada durante la extracción o el linteo.
     pub cancelled: bool,
+    /// Cobertura por pack de objeto (D01).
+    pub pack_coverage: Vec<PackCoverage>,
 }
 
 /// Checkpoint de cancelación/presupuesto cada N líneas (A04).
 const LINE_CHECKPOINT: usize = 512;
 
-/// Resultado de evaluar UN objeto (B03).
+/// Resultado de evaluar UN objeto (B03/D01).
 struct ObjectRun {
     issues: Vec<Issue>,
     limit: Option<String>,
     cancelled: bool,
+    pack_coverage: Vec<PackCoverage>,
 }
 
 /// Evalúa un objeto completo: reset → líneas → finalize → identidad.
 ///
 /// Compartido por la ruta secuencial y la ruta por chunks paralelos.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_object(
     rules: &mut [Box<dyn Rule>],
     dispatch: &DispatchPlan,
+    facts_union: FactSet,
     path: &Path,
     object: &gx_core::models::SourceObject,
     ctx: &AuditContext,
@@ -141,6 +150,51 @@ fn evaluate_object(
         issues.extend(rule.finalize(ctx));
     }
 
+    // D01/D02: packs de objeto. Los hechos se calculan UNA vez por objeto y
+    // sólo si algún pack seleccionado los requiere; el perfil de estilo común
+    // (facts_union vacío) no toca el modelo semántico.
+    let mut pack_coverage: Vec<PackCoverage> = Vec::new();
+    if !facts_union.is_empty() && !dispatch.object_rules().is_empty() {
+        let model = if facts_union.needs_model() {
+            gx_core::stats::count_fact_model_request();
+            let mut cache = GLOBAL_FACT_CACHE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let (model, _hit) = cache.get_or_build(&object.text, facts_union);
+            model
+        } else {
+            std::sync::Arc::new(gx_core::semantics::analyze(&object.text))
+        };
+        let facts = ObjectFacts {
+            text: &object.text,
+            tokens: Some(&model.tokens),
+            model: Some(&model),
+        };
+        for &rule_index in dispatch.object_rules() {
+            let rule = &mut rules[rule_index];
+            let capability = rule.capability();
+            let mut coverage = PackCoverage {
+                id: rule.id().to_string(),
+                version: rule.version().to_string(),
+                objects_analyzed: 0,
+                skipped_unsupported: 0,
+                findings: 0,
+            };
+            if !facts.has(capability.facts) {
+                coverage.skipped_unsupported = 1;
+            } else {
+                let result = rule.analyze_object(&facts, ctx);
+                coverage.objects_analyzed = 1;
+                coverage.findings = result.len();
+                if !result.is_empty() {
+                    gx_core::stats::note_first_finding();
+                }
+                issues.extend(result);
+            }
+            pack_coverage.push(coverage);
+        }
+    }
+
     // Stamp de identidad de objeto (GX-006).
     let object_ref = object.object.clone();
     for issue in issues.iter_mut() {
@@ -151,6 +205,7 @@ fn evaluate_object(
         issues,
         limit,
         cancelled,
+        pack_coverage,
     }
 }
 
@@ -160,6 +215,7 @@ fn evaluate_object(
 pub fn run_file_with_budget(
     rules: &mut [Box<dyn Rule>],
     dispatch: &DispatchPlan,
+    facts_union: FactSet,
     path: &Path,
     ctx: &AuditContext,
     budget: &ExecutionBudget,
@@ -171,13 +227,24 @@ pub fn run_file_with_budget(
     let mut limit: Option<String> = None;
     let mut cancelled = false;
     let mut objects: usize = 0;
+    let mut pack_coverage: Vec<PackCoverage> = Vec::new();
 
     for item in stream.by_ref() {
         let object = item?;
         objects += 1;
         gx_core::stats::count_objects(1);
-        let run = evaluate_object(rules, dispatch, path, &object, ctx, budget, cancel);
+        let run = evaluate_object(
+            rules,
+            dispatch,
+            facts_union,
+            path,
+            &object,
+            ctx,
+            budget,
+            cancel,
+        );
         issues.extend(run.issues);
+        merge_pack_coverage(&mut pack_coverage, run.pack_coverage);
         if run.cancelled {
             cancelled = true;
             break;
@@ -204,7 +271,15 @@ pub fn run_file_with_budget(
         limit = stream_limit;
     }
     cancelled |= stream_cancelled;
-    finish_file_run(path, t_start, objects, issues, limit, cancelled)
+    finish_file_run(
+        path,
+        t_start,
+        objects,
+        issues,
+        limit,
+        cancelled,
+        pack_coverage,
+    )
 }
 
 /// Chunk de objetos evaluados en paralelo dentro de un paquete (B03).
@@ -233,6 +308,7 @@ pub fn run_file_planned(
     let mut limit: Option<String> = None;
     let mut cancelled = false;
     let mut objects: usize = 0;
+    let mut pack_coverage: Vec<PackCoverage> = Vec::new();
     let mut chunk: Vec<gx_core::models::SourceObject> = Vec::with_capacity(OBJECT_CHUNK);
 
     loop {
@@ -253,7 +329,16 @@ pub fn run_file_planned(
             .map(|object| {
                 gx_core::stats::count_objects(1);
                 with_worker_rules(plan, |rules| {
-                    evaluate_object(rules, plan.dispatch(), path, object, ctx, budget, cancel)
+                    evaluate_object(
+                        rules,
+                        plan.dispatch(),
+                        plan.facts_union(),
+                        path,
+                        object,
+                        ctx,
+                        budget,
+                        cancel,
+                    )
                 })
             })
             .collect();
@@ -268,6 +353,7 @@ pub fn run_file_planned(
                 stop_limit = run.limit;
             }
             issues.extend(run.issues);
+            merge_pack_coverage(&mut pack_coverage, run.pack_coverage);
         }
         if stop_cancelled {
             cancelled = true;
@@ -295,7 +381,57 @@ pub fn run_file_planned(
         limit = stream_limit;
     }
     cancelled |= stream_cancelled;
-    finish_file_run(path, t_start, objects, issues, limit, cancelled)
+    finish_file_run(
+        path,
+        t_start,
+        objects,
+        issues,
+        limit,
+        cancelled,
+        pack_coverage,
+    )
+}
+
+/// Suma la cobertura de un objeto a la cobertura acumulada del archivo (D01).
+fn merge_pack_coverage(accumulated: &mut Vec<PackCoverage>, from_object: Vec<PackCoverage>) {
+    for coverage in from_object {
+        match accumulated
+            .iter_mut()
+            .find(|existing| existing.id == coverage.id)
+        {
+            Some(existing) => {
+                existing.objects_analyzed += coverage.objects_analyzed;
+                existing.skipped_unsupported += coverage.skipped_unsupported;
+                existing.findings += coverage.findings;
+            }
+            None => accumulated.push(coverage),
+        }
+    }
+}
+
+/// D03: resumen de seguridad separado del veredicto de estilo; `None` si
+/// ningún pack de seguridad aportó hallazgos.
+fn build_security_summary(findings: &[Issue]) -> Option<SecuritySummary> {
+    let security: Vec<&Issue> = findings
+        .iter()
+        .filter(|issue| issue.category.as_deref() == Some("security"))
+        .collect();
+    if security.is_empty() {
+        return None;
+    }
+    let errors = security
+        .iter()
+        .filter(|issue| issue.severity == gx_core::models::Severity::Error)
+        .count();
+    Some(SecuritySummary {
+        findings: security.len(),
+        errors,
+        verdict: if errors > 0 {
+            QgVerdict::Reject
+        } else {
+            QgVerdict::Pass
+        },
+    })
 }
 
 /// Rule-set reutilizable por worker para un plan concreto (B02).
@@ -337,6 +473,7 @@ fn finish_file_run(
     issues: Vec<Issue>,
     limit: Option<String>,
     cancelled: bool,
+    pack_coverage: Vec<PackCoverage>,
 ) -> Result<FileRunOutcome> {
     // Si se cortó por cancelación, los hallazgos acumulados se conservan
     // pero el archivo NO cuenta como escaneado con éxito.
@@ -355,6 +492,7 @@ fn finish_file_run(
         elapsed_ms,
         limit,
         cancelled,
+        pack_coverage,
     })
 }
 
@@ -539,10 +677,12 @@ pub fn analyze_with_options(
     let mut scanned_files: usize = 0;
     let mut any_cancelled = false;
     let mut any_limit = false;
+    let mut pack_coverage: Vec<PackCoverage> = Vec::new();
     for outcome in outcomes {
         if outcome.cancelled {
             any_cancelled = true;
             findings.extend(outcome.issues);
+            merge_pack_coverage(&mut pack_coverage, outcome.pack_coverage);
             failures.push(ScanFailure {
                 path: outcome.path,
                 error: CANCELLED_MESSAGE.to_string(),
@@ -558,6 +698,7 @@ pub fn analyze_with_options(
         }
         scanned_files += 1;
         findings.extend(outcome.issues);
+        merge_pack_coverage(&mut pack_coverage, outcome.pack_coverage);
         if let Some(limit) = outcome.limit {
             any_limit = true;
             failures.push(ScanFailure {
@@ -566,6 +707,7 @@ pub fn analyze_with_options(
             });
         }
     }
+    pack_coverage.sort_by(|a, b| a.id.cmp(&b.id));
 
     // Completitud (A04): una cancelación o un límite de recursos NUNCA es un
     // PASS sin calificar; los hallazgos ya calculados se conservan.
@@ -579,9 +721,19 @@ pub fn analyze_with_options(
         ScanCompletion::Failed
     };
 
+    // D03: la seguridad se evalúa aparte de la política de estilo; un error
+    // de seguridad no se diluye por el porcentaje de hallazgos de estilo.
+    let security = build_security_summary(&findings);
+    let security_failed = security
+        .as_ref()
+        .map(|summary| summary.errors > 0)
+        .unwrap_or(false);
+
     let metrics = build_metrics(&findings);
     let verdict = if completion != ScanCompletion::Complete {
         QgVerdict::Error
+    } else if security_failed {
+        QgVerdict::Reject
     } else {
         request.policy.evaluate(&metrics)
     };
@@ -597,6 +749,8 @@ pub fn analyze_with_options(
         verdict,
         coverage,
         completion,
+        pack_coverage,
+        security,
     }
 }
 
@@ -631,6 +785,8 @@ pub struct FileScanOutcome {
     pub limit: Option<String>,
     /// Cancelación durante la evaluación del archivo (A04).
     pub cancelled: bool,
+    /// Cobertura por pack de objeto (D01).
+    pub pack_coverage: Vec<PackCoverage>,
 }
 
 /// Whether `rule_id` is a concrete rule compiled into the registry.
@@ -691,6 +847,8 @@ fn invalid_result(request: &AnalysisRequest, message: String) -> AnalysisResult 
             ..Default::default()
         },
         completion: ScanCompletion::Failed,
+        pack_coverage: Vec::new(),
+        security: None,
     }
 }
 
@@ -705,6 +863,9 @@ pub struct RulePlan {
     id: u64,
     descriptors: Vec<&'static RuleDescriptor>,
     dispatch: DispatchPlan,
+    /// Unión de hechos requeridos por los packs seleccionados (D01). Vacía
+    /// para el perfil de estilo común: no se construye ningún hecho.
+    facts_union: FactSet,
 }
 
 static NEXT_PLAN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -717,15 +878,24 @@ impl RulePlan {
             .filter(|descriptor| !descriptor.is_abstract && enabled_ids.contains(descriptor.id))
             .collect();
         let dispatch = plan_dispatch_descriptors(&descriptors).map_err(anyhow::Error::msg)?;
+        let facts_union = descriptors.iter().fold(FactSet::NONE, |acc, descriptor| {
+            acc.union(descriptor.capability.facts)
+        });
         Ok(RulePlan {
             id: NEXT_PLAN_ID.fetch_add(1, Ordering::Relaxed),
             descriptors,
             dispatch,
+            facts_union,
         })
     }
 
     fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Hechos requeridos por el plan (D01): vacío ⇒ sin costo semántico.
+    pub fn facts_union(&self) -> FactSet {
+        self.facts_union
     }
 
     pub fn rules_len(&self) -> usize {
@@ -800,6 +970,7 @@ where
                     error: Some(message.clone()),
                     limit: None,
                     cancelled: false,
+                    pack_coverage: Vec::new(),
                 })
                 .collect();
         }
@@ -817,6 +988,7 @@ where
                         error: Some(CANCELLED_MESSAGE.to_string()),
                         limit: None,
                         cancelled: true,
+                        pack_coverage: Vec::new(),
                     }
                 } else {
                     let ctx = ctx_factory(p);
@@ -830,6 +1002,7 @@ where
                                 error: None,
                                 limit: run.limit,
                                 cancelled: run.cancelled,
+                                pack_coverage: run.pack_coverage,
                             }
                         }
                         Err(e) => FileScanOutcome {
@@ -839,6 +1012,7 @@ where
                             error: Some(e.to_string()),
                             limit: None,
                             cancelled: false,
+                            pack_coverage: Vec::new(),
                         },
                     }
                 };
