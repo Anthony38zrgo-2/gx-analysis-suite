@@ -820,8 +820,23 @@ fn check_gates(manifest: &CorpusManifest, run: &RunReport, rule_count: usize) ->
                 stats.fact_model_requests
             );
         }
+        // D04: el pase project-wide (GX.SEC.3 también corre en el bench)
+        // recolecta exactamente los mismos objetos, sin duplicar ni perder.
+        if stats.project_objects as usize != expected {
+            bail!(
+                "gate de proyecto: esperados {expected} objetos y hubo {}",
+                stats.project_objects
+            );
+        }
     }
     if let Some(expected) = manifest.expected_xml_parses {
+        // D04: cuando corre el pase project-wide (bench con packs profundos)
+        // cada miembro XML se re-extrae una vez para recolectar el proyecto.
+        let expected = if stats.project_objects > 0 {
+            expected * 2
+        } else {
+            expected
+        };
         if stats.parser_invocations as usize != expected {
             bail!(
                 "gate de parser: esperadas {expected} invocaciones y hubo {}",
@@ -835,11 +850,12 @@ fn check_gates(manifest: &CorpusManifest, run: &RunReport, rule_count: usize) ->
     if stats.rule_set_instantiations == 0 {
         bail!("gate de factories: no se instanció ningún rule-set");
     }
-    // B02: como máximo un rule-set por worker/objeto (no por archivo×catálogo).
+    // B02/D04: como máximo un rule-set por worker/objeto, más UN set para el
+    // pase project-wide cuando hay packs profundos seleccionados.
     if let Some(objects) = manifest.expected_objects {
-        if stats.rule_set_instantiations > objects as u64 {
+        if stats.rule_set_instantiations > objects as u64 + 1 {
             bail!(
-                "gate de factories: {} rule-sets para {objects} objetos",
+                "gate de factories: {} rule-sets para {objects} objetos (+1 de proyecto)",
                 stats.rule_set_instantiations
             );
         }

@@ -468,7 +468,7 @@ fn rules_list_from_csv() {
     let out = gx(&["rules", "list", "--rules-csv", csv.to_str().unwrap()]);
     assert_eq!(out.code, 0);
     assert!(out.stdout.contains("GX.2.6"));
-    assert!(out.stdout.contains("27 reglas operativas"));
+    assert!(out.stdout.contains("28 reglas operativas"));
 }
 
 /// XPZ real empaquetado como RAR: se lintea con identidad de objeto real.

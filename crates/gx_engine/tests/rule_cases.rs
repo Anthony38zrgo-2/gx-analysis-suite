@@ -307,9 +307,15 @@ fn all_concrete_rules_have_green_cases() {
         .filter(|r| !r.is_abstract())
         .map(|r| r.id())
         .collect();
-    // D01: 24 reglas de línea + packs de objeto (D02/D03) = 27 concretas.
-    assert_eq!(concrete.len(), 27);
+    // D01: 24 reglas de línea + packs de objeto (D02/D03) + pack
+    // project-wide (D04) = 28 concretas.
+    assert_eq!(concrete.len(), 28);
     for id in concrete {
+        // Los packs project-wide requieren un proyecto multi-objeto y se
+        // validan en `phase_d_deep.rs`.
+        if matches!(id, "GX.SEC.3") {
+            continue;
+        }
         assert!(
             covered.contains(id),
             "la regla {id} no tiene ningún fixture positivo/negativo"

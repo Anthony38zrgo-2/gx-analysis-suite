@@ -660,3 +660,42 @@ All probes above are now regression tests.
   test; `npm run build` (vue-tsc + vite): passed; clippy/fmt clean in both
   workspaces; MSRV 1.89 and `check-boundaries`: clean; bench gates pass for
   `small-files` and `real` (facts once per object, findings preserved).
+
+## 13. Implementation log — D04 deep profile (project-wide)
+
+**D04 — Incremental and project-wide analysis.**
+- `gx_core::project` builds a dependency graph from documented
+  `call('Objeto', …)`/`udp('Objeto', …)` calls (positional parameter mapping),
+  computes SCCs with an iterative Tarjan and runs a bounded worklist fixpoint
+  for interprocedural taint. Object summaries capture dependencies, call
+  sites, parameter directions, per-parameter sink flows and out-parameter
+  flows; entry objects (no incoming edges) treat `parm(in|inout)` as external
+  sources, so findings explain source → call → sink across objects.
+- Content-addressed summary cache keyed by source digest + parser/engine
+  versions + analysis version + enabled-configuration hash, bounded by entries
+  and approximate bytes with eviction; `invalidate_dependents` walks the
+  reverse edges transitively, and `dependents_of` exposes the invalidation
+  set. Unchanged objects reuse summaries (cold/warm hits counted in
+  `gx_core::stats`); models are only rebuilt for objects actually processed.
+- Limits: `ProjectLimits` caps objects, bytes, edges, fixpoint iterations,
+  findings and trace length. Exhausting any cap sets
+  `ProjectCoverage.truncated` with a reason; the engine converts it into a
+  `partial` completion plus an explicit failure, so the deep profile can never
+  claim completion after a limit or silently consume the standard profile's
+  budget (the pass is opt-in via `GX.SEC.3`, `cost = deep`, `route = project`).
+- `GX.SEC.3` maps report findings to issues with object identity, category,
+  confidence, CWE and the bounded trace; `ScanStats` gained project counters
+  and the bench gate now asserts `project_objects == objects` (plus the
+  documented +1 rule-set for the project pass) when deep packs are selected.
+
+**Verification (D04).**
+- `cargo test --workspace`: 169 tests passed; desktop workspace: 15 + contract
+  test; `npm run build` (vue-tsc + vite): passed; clippy/fmt clean in both
+  workspaces; MSRV 1.89 and `check-boundaries`: clean.
+- New tests: project unit tests (interprocedural flow with trace, out-parameter
+  return flow, bounded recursion/SCC, warm cache reuse, transitive
+  invalidation, limit truncation, eviction, digest/config key) and
+  `phase_d_deep.rs` (opt-in profile, cross-object finding, zero project work
+  for the standard profile, warm cache on the second run).
+- Bench gates pass for `small-files`, `wide-xml` (XML re-extraction counted)
+  and `real`; the real corpus keeps 549 findings (no new false positives).

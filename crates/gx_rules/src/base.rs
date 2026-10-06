@@ -22,6 +22,8 @@ pub enum Scope {
     Line,
     /// Análisis por objeto que requiere hechos compartidos.
     Object,
+    /// Perfil profundo project-wide (D04): grafo + taint interprocedural.
+    Project,
 }
 
 /// Clase de costo declarada (D01): permite perfiles opt-in profundos.
@@ -71,6 +73,13 @@ impl ObjectFacts<'_> {
             true
         }
     }
+}
+
+/// Hechos del perfil profundo project-wide (D04).
+pub struct ProjectFacts<'a> {
+    pub report: &'a gx_core::project::ProjectReport,
+    /// Identidad completa por nombre de objeto normalizado (minúsculas).
+    pub objects: &'a std::collections::HashMap<String, gx_core::models::ObjectRef>,
 }
 
 /// Cobertura declarada por un pack tras analizar un objeto (D03).
@@ -147,6 +156,8 @@ pub enum DispatchRoute {
     Tokens(&'static [&'static str]),
     /// Pack de objeto (D01): nunca se despacha por línea.
     Object,
+    /// Pack project-wide (D04): corre una vez por proyecto.
+    Project,
 }
 
 /// Descriptor inmutable de una regla (B02).
@@ -169,6 +180,7 @@ pub struct RuleDescriptor {
     /// `Some(tokens)` ⇒ ruta `Tokens`; `None` ⇒ `AllLines`; `Object` ⇒ pack.
     pub tokens_route: Option<&'static [&'static str]>,
     pub is_object_route: bool,
+    pub is_project_route: bool,
     pub capability: Capability,
     pub factory: fn() -> Box<dyn Rule>,
 }
@@ -176,6 +188,9 @@ pub struct RuleDescriptor {
 impl RuleDescriptor {
     /// Ruta de despacho declarada por la regla.
     pub fn dispatch_route(&self) -> DispatchRoute {
+        if self.is_project_route {
+            return DispatchRoute::Project;
+        }
         if self.is_object_route {
             return DispatchRoute::Object;
         }
@@ -224,6 +239,10 @@ pub trait Rule: Send + Sync {
     fn coverage_hint(&self) -> CoverageHint {
         CoverageHint::default()
     }
+    /// Análisis project-wide (D04): sólo lo implementan los packs profundos.
+    fn analyze_project(&mut self, _project: &ProjectFacts<'_>, _ctx: &AuditContext) -> Vec<Issue> {
+        vec![]
+    }
     fn finalize(&mut self, _ctx: &AuditContext) -> Vec<Issue> {
         vec![]
     }
@@ -241,12 +260,14 @@ macro_rules! define_rule {
         ::core::option::Option::Some(&[$($trig),*])
     };
     (@route [$($trig:literal),*] object) => { ::core::option::Option::None };
+    (@route [$($trig:literal),*] project) => { ::core::option::Option::None };
     (@version $v:literal) => { $v };
     (@version) => { "1.0" };
     (@category $c:literal) => { $c };
     (@category) => { "policy" };
     (@scope line) => { $crate::base::Scope::Line };
     (@scope object) => { $crate::base::Scope::Object };
+    (@scope project) => { $crate::base::Scope::Project };
     (@scope) => { $crate::base::Scope::Line };
     (@cost cheap) => { $crate::base::Cost::Cheap };
     (@cost moderate) => { $crate::base::Cost::Moderate };
@@ -259,6 +280,9 @@ macro_rules! define_rule {
     (@is_object object) => { true };
     (@is_object $other:ident) => { false };
     (@is_object) => { false };
+    (@is_project project) => { true };
+    (@is_project $other:ident) => { false };
+    (@is_project) => { false };
 
     (
         id = $rid:literal,
@@ -280,6 +304,7 @@ macro_rules! define_rule {
         evaluate = $eval:expr
         $(, analyze = $analyze:expr)?
         $(, coverage = $coverage:expr)?
+        $(, project = $project:expr)?
         $(, finalize = $fin:expr)?
         $(,)?
     ) => {
@@ -312,6 +337,7 @@ macro_rules! define_rule {
                     is_abstract: $abs,
                     tokens_route: $crate::define_rule!(@route [$($trig),*] $($route)?),
                     is_object_route: $crate::define_rule!(@is_object $($route)?),
+                    is_project_route: $crate::define_rule!(@is_project $($route)?),
                     capability: $crate::base::Capability {
                         scope: $crate::define_rule!(@scope $($scope)?),
                         facts: $crate::base::FactSet::NONE
@@ -339,6 +365,9 @@ macro_rules! define_rule {
                     }
                     if stringify!($route) == "object" {
                         return $crate::base::DispatchRoute::Object;
+                    }
+                    if stringify!($route) == "project" {
+                        return $crate::base::DispatchRoute::Project;
                     }
                 )?
                 $crate::base::DispatchRoute::AllLines
@@ -374,6 +403,16 @@ macro_rules! define_rule {
             fn coverage_hint(&self) -> $crate::base::CoverageHint {
                 $( return ($coverage)(self); )?
                 $crate::base::CoverageHint::default()
+            }
+
+            #[allow(unused_variables, unreachable_code)]
+            fn analyze_project(
+                &mut self,
+                project: &$crate::base::ProjectFacts<'_>,
+                ctx: &$crate::base::AuditContext,
+            ) -> ::std::vec::Vec<$crate::base::Issue> {
+                $( return ($project)(self, project, ctx); )?
+                ::std::vec::Vec::new()
             }
 
             #[allow(unused_variables, unreachable_code)]

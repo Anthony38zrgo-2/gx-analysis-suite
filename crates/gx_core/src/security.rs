@@ -114,13 +114,13 @@ pub struct TaintReport {
 }
 
 #[derive(Debug, Clone)]
-struct Call {
-    line: u32,
-    receiver: Option<String>,
-    method: String,
-    arg_variables: Vec<String>,
-    arg_strings: Vec<String>,
-    arg_calls: Vec<String>,
+pub(crate) struct Call {
+    pub(crate) line: u32,
+    pub(crate) receiver: Option<String>,
+    pub(crate) method: String,
+    pub(crate) arg_variables: Vec<String>,
+    pub(crate) arg_strings: Vec<String>,
+    pub(crate) arg_calls: Vec<String>,
 }
 
 fn name_of(token: &Token) -> Option<String> {
@@ -136,7 +136,7 @@ fn contains_hint(name: &str, hints: &[&str]) -> bool {
 
 /// Extrae llamadas `metodo(...)` con receptor y argumentos desde los tokens
 /// de una línea.
-fn calls_in_line(tokens: &[Token]) -> Vec<Call> {
+pub(crate) fn calls_in_line(tokens: &[Token]) -> Vec<Call> {
     let mut calls = Vec::new();
     let mut index = 0usize;
     while index < tokens.len() {
@@ -270,59 +270,23 @@ fn parameter_line(model: &SemanticModel, name: &str) -> u32 {
         .unwrap_or(1)
 }
 
-/// Analiza taint local intra-objeto (D03).
-pub fn analyze_taint(model: &SemanticModel, _text: &str) -> TaintReport {
-    // Cobertura incompleta: no se declaran flujos de datos.
-    if !model.coverage.complete {
-        return TaintReport::default();
-    }
+/// Estado de taint tras el punto fijo local (D03/D04).
+#[derive(Debug, Clone, Default)]
+pub struct TaintState {
+    pub tainted: HashSet<String>,
+    pub paths: HashMap<String, Vec<TraceStep>>,
+    pub unsupported_sanitizers: usize,
+}
 
-    let mut tainted: HashSet<String> = HashSet::new();
-    let mut paths: HashMap<String, Vec<TraceStep>> = HashMap::new();
-
-    for parameter in &model.parameters {
-        if matches!(
-            parameter.direction,
-            ParamDirection::In | ParamDirection::InOut
-        ) {
-            let line = parameter_line(model, &parameter.name);
-            tainted.insert(parameter.name.clone());
-            paths.insert(
-                parameter.name.clone(),
-                vec![TraceStep {
-                    kind: "source".to_string(),
-                    line,
-                    detail: format!("parm entrada {}", parameter.name),
-                }],
-            );
-        }
-    }
-    for token in &model.tokens {
-        if token.kind == TokenKind::Variable {
-            let name = token.text.to_lowercase();
-            if SOURCE_CONTAINERS
-                .iter()
-                .any(|prefix| name.starts_with(&format!("&{prefix}")))
-            {
-                tainted.insert(name.clone());
-                paths.entry(name.clone()).or_insert_with(|| {
-                    vec![TraceStep {
-                        kind: "source".to_string(),
-                        line: token.line,
-                        detail: "request/contenedor externo".to_string(),
-                    }]
-                });
-            }
-        }
-    }
-
-    let statement_kind: HashMap<u32, StatementKind> = model
-        .statements
-        .iter()
-        .map(|statement| (statement.line, statement.kind))
-        .collect();
-
-    // Punto fijo acotado: cada pasada propaga asignaciones en orden.
+/// Propaga taint desde un conjunto inicial (D03/D04).
+///
+/// Compartido por el análisis intra-objeto y por los flujos por parámetro del
+/// perfil profundo; punto fijo acotado por [`MAX_PASSES`].
+pub fn propagate(
+    model: &SemanticModel,
+    mut tainted: HashSet<String>,
+    mut paths: HashMap<String, Vec<TraceStep>>,
+) -> TaintState {
     let mut unsupported_sanitizers = 0usize;
     // Cada ocurrencia no modelada se cuenta UNA vez (aunque haya N pasadas).
     let mut seen_unsupported: HashSet<(u32, String)> = HashSet::new();
@@ -417,8 +381,19 @@ pub fn analyze_taint(model: &SemanticModel, _text: &str) -> TaintReport {
             break;
         }
     }
+    TaintState {
+        tainted,
+        paths,
+        unsupported_sanitizers,
+    }
+}
 
-    // Detección de sinks sobre el punto fijo.
+/// Detección de sinks dado un estado de taint (D03/D04).
+pub fn detect_sinks(
+    model: &SemanticModel,
+    tainted: &HashSet<String>,
+    paths: &HashMap<String, Vec<TraceStep>>,
+) -> Vec<TaintFinding> {
     let mut findings: Vec<TaintFinding> = Vec::new();
     let mut seen: HashSet<(u32, &'static str)> = HashSet::new();
     let mut lines: Vec<u32> = model
@@ -429,8 +404,7 @@ pub fn analyze_taint(model: &SemanticModel, _text: &str) -> TaintReport {
         .into_iter()
         .collect();
     lines.sort_unstable();
-    for line in lines {
-        let _ = statement_kind.get(&line);
+    'lines: for line in lines {
         let tokens: Vec<Token> = model
             .tokens
             .iter()
@@ -490,18 +464,144 @@ pub fn analyze_taint(model: &SemanticModel, _text: &str) -> TaintReport {
                 trace,
             });
             if findings.len() >= MAX_FINDINGS {
-                return TaintReport {
-                    findings,
-                    unsupported_sanitizers,
-                };
+                break 'lines;
+            }
+        }
+    }
+    findings
+}
+
+/// Analiza taint local intra-objeto (D03).
+pub fn analyze_taint(model: &SemanticModel, _text: &str) -> TaintReport {
+    // Cobertura incompleta: no se declaran flujos de datos.
+    if !model.coverage.complete {
+        return TaintReport::default();
+    }
+
+    let mut tainted: HashSet<String> = HashSet::new();
+    let mut paths: HashMap<String, Vec<TraceStep>> = HashMap::new();
+
+    for parameter in &model.parameters {
+        if matches!(
+            parameter.direction,
+            ParamDirection::In | ParamDirection::InOut
+        ) {
+            let line = parameter_line(model, &parameter.name);
+            tainted.insert(parameter.name.clone());
+            paths.insert(
+                parameter.name.clone(),
+                vec![TraceStep {
+                    kind: "source".to_string(),
+                    line,
+                    detail: format!("parm entrada {}", parameter.name),
+                }],
+            );
+        }
+    }
+    for token in &model.tokens {
+        if token.kind == TokenKind::Variable {
+            let name = token.text.to_lowercase();
+            if SOURCE_CONTAINERS
+                .iter()
+                .any(|prefix| name.starts_with(&format!("&{prefix}")))
+            {
+                tainted.insert(name.clone());
+                paths.entry(name.clone()).or_insert_with(|| {
+                    vec![TraceStep {
+                        kind: "source".to_string(),
+                        line: token.line,
+                        detail: "request/contenedor externo".to_string(),
+                    }]
+                });
             }
         }
     }
 
+    let state = propagate(model, tainted, paths);
     TaintReport {
-        findings,
-        unsupported_sanitizers,
+        findings: detect_sinks(model, &state.tainted, &state.paths),
+        unsupported_sanitizers: state.unsupported_sanitizers,
     }
+}
+
+/// Flujo de un parámetro de entrada hacia un sink (D04).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamSink {
+    pub param: usize,
+    pub line: u32,
+    pub cwe: u32,
+    pub sink_class: &'static str,
+}
+
+/// Flujo de un parámetro de entrada hacia un parámetro de salida (D04).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamOut {
+    pub from_param: usize,
+    pub to_param: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParamFlow {
+    pub sinks: Vec<ParamSink>,
+    pub outs: Vec<ParamOut>,
+}
+
+/// Parámetros máximos considerados por el análisis por parámetro (D04).
+pub const MAX_FLOW_PARAMS: usize = 32;
+
+/// Para cada parámetro In/InOut calcula si su valor alcanza un sink o un
+/// parámetro de salida dentro del objeto (D04).
+pub fn analyze_param_flows(model: &SemanticModel) -> ParamFlow {
+    let mut flow = ParamFlow::default();
+    if !model.coverage.complete {
+        return flow;
+    }
+    for (index, parameter) in model.parameters.iter().enumerate() {
+        if index >= MAX_FLOW_PARAMS {
+            break;
+        }
+        if !matches!(
+            parameter.direction,
+            ParamDirection::In | ParamDirection::InOut
+        ) {
+            continue;
+        }
+        let mut tainted = HashSet::new();
+        tainted.insert(parameter.name.clone());
+        let mut paths = HashMap::new();
+        paths.insert(
+            parameter.name.clone(),
+            vec![TraceStep {
+                kind: "source".to_string(),
+                line: parameter_line(model, &parameter.name),
+                detail: format!("parm entrada {}", parameter.name),
+            }],
+        );
+        let state = propagate(model, tainted, paths);
+        for finding in detect_sinks(model, &state.tainted, &state.paths) {
+            flow.sinks.push(ParamSink {
+                param: index,
+                line: finding.line,
+                cwe: finding.cwe,
+                sink_class: finding.sink_class,
+            });
+        }
+        for (out_index, out_parameter) in model.parameters.iter().enumerate() {
+            if !matches!(
+                out_parameter.direction,
+                ParamDirection::Out | ParamDirection::InOut
+            ) {
+                continue;
+            }
+            if state.tainted.contains(&out_parameter.name) {
+                flow.outs.push(ParamOut {
+                    from_param: index,
+                    to_param: out_index,
+                });
+            }
+        }
+    }
+    flow
 }
 
 #[cfg(test)]

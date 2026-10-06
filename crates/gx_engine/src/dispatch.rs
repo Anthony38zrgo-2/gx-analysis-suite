@@ -86,6 +86,8 @@ pub struct DispatchPlan {
     token_rules: Vec<(usize, Vec<TriggerFn>)>,
     /// Ascending indices de packs de objeto (D01): nunca corren por línea.
     object_rules: Vec<usize>,
+    /// Ascending indices de packs project-wide (D04).
+    project_rules: Vec<usize>,
 }
 
 impl DispatchPlan {
@@ -96,7 +98,13 @@ impl DispatchPlan {
             all_lines: (0..rule_count).collect(),
             token_rules: Vec::new(),
             object_rules: Vec::new(),
+            project_rules: Vec::new(),
         }
+    }
+
+    /// Índices de los packs project-wide seleccionados (D04).
+    pub fn project_rules(&self) -> &[usize] {
+        &self.project_rules
     }
 
     /// Índices de los packs de objeto seleccionados, en orden de registry.
@@ -131,6 +139,7 @@ fn plan_dispatch_routes(routes: &[DispatchRoute]) -> Result<DispatchPlan, String
         all_lines: Vec::new(),
         token_rules: Vec::new(),
         object_rules: Vec::new(),
+        project_rules: Vec::new(),
     };
     for (idx, route) in routes.iter().enumerate() {
         match route {
@@ -146,6 +155,7 @@ fn plan_dispatch_routes(routes: &[DispatchRoute]) -> Result<DispatchPlan, String
                 plan.token_rules.push((idx, fns));
             }
             DispatchRoute::Object => plan.object_rules.push(idx),
+            DispatchRoute::Project => plan.project_rules.push(idx),
         }
     }
     Ok(plan)

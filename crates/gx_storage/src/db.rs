@@ -103,8 +103,8 @@ pub fn get_pool() -> Result<SqlitePool> {
 mod tests {
     use super::*;
 
-    /// GX-009/D01: una base fresca tiene 33 filas de catálogo (27 concretas:
-    /// 24 reglas de línea + 3 packs opt-in) y exactamente 15 habilitadas.
+    /// GX-009/D01: una base fresca tiene 34 filas de catálogo (28 concretas:
+    /// 24 reglas de línea + 4 packs opt-in) y exactamente 15 habilitadas.
     #[test]
     fn fresh_db_has_full_catalog() {
         let conn = init_memory_db().unwrap();
@@ -115,7 +115,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(concrete, 27);
+        assert_eq!(concrete, 28);
         let enabled: usize = conn
             .query_row(
                 "SELECT COUNT(*) FROM rules WHERE is_abstract = 0 AND enabled = 1",

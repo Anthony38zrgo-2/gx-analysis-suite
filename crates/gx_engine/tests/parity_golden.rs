@@ -219,13 +219,16 @@ fn concrete_rules_are_covered_by_manifest() {
 
     let packs: Vec<String> = gx_rules::all_rules()
         .iter()
-        .filter(|r| !r.is_abstract() && r.capability().scope == Scope::Object)
+        .filter(|r| {
+            !r.is_abstract() && matches!(r.capability().scope, Scope::Object | Scope::Project)
+        })
         .map(|r| r.id().to_string())
         .collect();
     assert!(
         packs.contains(&"GX.2.7.5".to_string())
             && packs.contains(&"GX.SEC.1".to_string())
-            && packs.contains(&"GX.SEC.2".to_string()),
+            && packs.contains(&"GX.SEC.2".to_string())
+            && packs.contains(&"GX.SEC.3".to_string()),
         "los packs D01/D03 deben estar en el catálogo: {packs:?}"
     );
 }

@@ -14,7 +14,7 @@ use gx_core::models::{
 };
 use gx_core::semantics::{FactSet, GLOBAL_FACT_CACHE};
 use gx_core::validation::{validate_request_shape, ValidationError};
-use gx_rules::base::{ObjectFacts, Rule, RuleDescriptor};
+use gx_rules::base::{ObjectFacts, ProjectFacts, Rule, RuleDescriptor};
 use gx_sources::filesystem::{discover_source_files_with_cancel, is_source_extension};
 
 use crate::dispatch::{collect_candidate_rules_into, plan_dispatch_descriptors, DispatchPlan};
@@ -673,9 +673,16 @@ pub fn analyze_with_options(
             Default::default()
         };
 
+    // B02/D04: el plan se compila UNA vez; los packs project-wide corren
+    // después del pase por archivo.
+    let plan = match RulePlan::compile(&enabled) {
+        Ok(plan) => plan,
+        Err(error) => return invalid_result(request, error.to_string()),
+    };
+
     let outcomes = evaluate_files_parallel_with_ctx(
         &inputs,
-        &enabled,
+        &plan,
         |path| AuditContext {
             project_path: path.to_path_buf(),
             rules_path: path.to_path_buf(),
@@ -720,6 +727,31 @@ pub fn analyze_with_options(
             failures.push(ScanFailure {
                 path: outcome.path,
                 error: format!("presupuesto agotado: {limit}"),
+            });
+        }
+    }
+    // D04: perfil profundo project-wide (opt-in). Sus límites son propios y
+    // un truncamiento produce `partial`, nunca PASS silencioso.
+    if !plan.project_rules().is_empty() {
+        let pass = run_project_pass(
+            &plan,
+            &inputs,
+            budget,
+            cancel,
+            request,
+            &extra_settings,
+            &mut failures,
+        );
+        findings.extend(pass.issues);
+        merge_pack_coverage(&mut pack_coverage, pass.pack_coverage);
+        if pass.cancelled {
+            any_cancelled = true;
+        }
+        if let Some(limit) = pass.limit {
+            any_limit = true;
+            failures.push(ScanFailure {
+                path: PathBuf::from("<proyecto>"),
+                error: format!("perfil profundo: {limit}"),
             });
         }
     }
@@ -922,6 +954,11 @@ impl RulePlan {
         &self.dispatch
     }
 
+    /// Índices de los packs project-wide seleccionados (D04).
+    pub fn project_rules(&self) -> &[usize] {
+        self.dispatch.project_rules()
+    }
+
     /// Instancia SÓLO las reglas seleccionadas (contadores A02/B02).
     pub fn instantiate(&self) -> Vec<Box<dyn Rule>> {
         let rules: Vec<Box<dyn Rule>> = self
@@ -954,14 +991,169 @@ pub fn evaluate_files_parallel(
     ctx: &AuditContext,
 ) -> Vec<FileScanOutcome> {
     let budget = ExecutionBudget::default();
-    evaluate_files_parallel_with_ctx(paths, enabled_ids, |_p| ctx.clone(), None, None, &budget)
+    let plan = RulePlan::compile(enabled_ids).expect("reglas del registry con triggers válidos");
+    evaluate_files_parallel_with_ctx(paths, &plan, |_p| ctx.clone(), None, None, &budget)
+}
+
+/// Resultado del pase project-wide (D04).
+struct ProjectPassResult {
+    issues: Vec<Issue>,
+    pack_coverage: Vec<PackCoverage>,
+    limit: Option<String>,
+    cancelled: bool,
+}
+
+/// Pase de perfil profundo (D04): recolecta objetos acotados, construye el
+/// grafo/taint interprocedural con caché incremental y ejecuta los packs
+/// project-wide. Nunca declara completitud si se agota un límite.
+#[allow(clippy::too_many_arguments)]
+fn run_project_pass(
+    plan: &RulePlan,
+    inputs: &[PathBuf],
+    budget: &ExecutionBudget,
+    cancel: Option<&AtomicBool>,
+    request: &AnalysisRequest,
+    extra_settings: &std::collections::HashMap<String, String>,
+    failures: &mut Vec<ScanFailure>,
+) -> ProjectPassResult {
+    use gx_core::project::{self, ProjectInput, ProjectLimits};
+
+    let limits = ProjectLimits::default();
+    let mut objects: Vec<gx_core::models::SourceObject> = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut limit: Option<String> = None;
+    let mut cancelled = false;
+
+    'files: for path in inputs {
+        if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+            cancelled = true;
+            failures.push(ScanFailure {
+                path: path.clone(),
+                error: CANCELLED_MESSAGE.to_string(),
+            });
+            break;
+        }
+        if budget.is_expired() {
+            limit = Some("deadline de la corrida agotado".to_string());
+            break;
+        }
+        let stream = match gx_sources::xpz_extractor::source_object_stream(path, budget, cancel) {
+            Ok(stream) => stream,
+            Err(error) => {
+                failures.push(ScanFailure {
+                    path: path.clone(),
+                    error: error.to_string(),
+                });
+                continue;
+            }
+        };
+        for item in stream {
+            let object = match item {
+                Ok(object) => object,
+                Err(error) => {
+                    failures.push(ScanFailure {
+                        path: path.clone(),
+                        error: error.to_string(),
+                    });
+                    break;
+                }
+            };
+            total_bytes += object.text.len();
+            if objects.len() >= limits.max_objects || total_bytes > limits.max_bytes {
+                limit = Some(format!(
+                    "proyecto truncado: {} objetos / {} bytes > límites ({} / {})",
+                    objects.len() + 1,
+                    total_bytes,
+                    limits.max_objects,
+                    limits.max_bytes
+                ));
+                break 'files;
+            }
+            objects.push(object);
+        }
+    }
+
+    let project_inputs: Vec<ProjectInput<'_>> = objects
+        .iter()
+        .map(|object| ProjectInput {
+            name: object.object.id.clone(),
+            text: &object.text,
+        })
+        .collect();
+    let key = project::config_key(&request.enabled_rule_ids);
+    let report = {
+        let mut cache = project::GLOBAL_PROJECT_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        project::analyze_project(&project_inputs, &limits, key, &mut cache, None)
+    };
+    gx_core::stats::count_project_work(
+        report.coverage.objects,
+        report.coverage.edges,
+        report.coverage.iterations,
+        report.coverage.cache_hits,
+        report.coverage.cache_misses,
+    );
+    if report.coverage.truncated && limit.is_none() {
+        limit = report
+            .coverage
+            .reason
+            .clone()
+            .or_else(|| Some("proyecto truncado".to_string()));
+    }
+
+    let mut objects_by_name: std::collections::HashMap<String, gx_core::models::ObjectRef> =
+        std::collections::HashMap::new();
+    for object in &objects {
+        objects_by_name.insert(object.object.id.to_lowercase(), object.object.clone());
+    }
+
+    let ctx = AuditContext {
+        project_path: PathBuf::from("<proyecto>"),
+        rules_path: PathBuf::from("<proyecto>"),
+        max_errors: 0,
+        max_warnings: u32::MAX,
+        qg_threshold_pct: 10.0,
+        extra_settings: extra_settings.clone(),
+    };
+    let facts = ProjectFacts {
+        report: &report,
+        objects: &objects_by_name,
+    };
+    let mut rules = plan.instantiate();
+    let mut issues = Vec::new();
+    let mut pack_coverage = Vec::new();
+    for &index in plan.project_rules() {
+        let rule = &mut rules[index];
+        let result = rule.analyze_project(&facts, &ctx);
+        pack_coverage.push(PackCoverage {
+            id: rule.id().to_string(),
+            version: rule.version().to_string(),
+            objects_analyzed: report.coverage.objects,
+            skipped_unsupported: 0,
+            findings: result.len(),
+            unsupported_sanitizers: 0,
+        });
+        if !result.is_empty() {
+            gx_core::stats::note_first_finding();
+        }
+        issues.extend(result);
+    }
+    gx_core::stats::count_findings(issues.len());
+
+    ProjectPassResult {
+        issues,
+        pack_coverage,
+        limit,
+        cancelled,
+    }
 }
 
 /// Variante con contexto por archivo, progreso, cancelación y presupuesto
 /// (GX-016/A04).
 fn evaluate_files_parallel_with_ctx<F>(
     paths: &[PathBuf],
-    enabled_ids: &HashSet<String>,
+    plan: &RulePlan,
     ctx_factory: F,
     on_progress: Option<&(dyn Fn(FileProgress) + Sync)>,
     cancel: Option<&AtomicBool>,
@@ -973,25 +1165,6 @@ where
     use rayon::prelude::*;
 
     // B02: el plan se compila UNA vez; cada job de Rayon instancia sus reglas.
-    let plan = match RulePlan::compile(enabled_ids) {
-        Ok(plan) => plan,
-        Err(error) => {
-            let message = error.to_string();
-            return paths
-                .iter()
-                .map(|p| FileScanOutcome {
-                    path: p.clone(),
-                    issues: Vec::new(),
-                    metrics: AuditMetrics::default(),
-                    error: Some(message.clone()),
-                    limit: None,
-                    cancelled: false,
-                    pack_coverage: Vec::new(),
-                })
-                .collect();
-        }
-    };
-
     let evaluate = || {
         paths
             .par_iter()
@@ -1008,7 +1181,7 @@ where
                     }
                 } else {
                     let ctx = ctx_factory(p);
-                    match run_file_planned(&plan, p, &ctx, budget, cancel) {
+                    match run_file_planned(plan, p, &ctx, budget, cancel) {
                         Ok(run) => {
                             let metrics = AuditMetrics::from_issues(&run.issues);
                             FileScanOutcome {
