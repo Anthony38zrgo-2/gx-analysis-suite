@@ -141,8 +141,8 @@ fn insert_issues_in_tx(conn: &Connection, run_id: i64, issues: &[Issue]) -> Resu
         "INSERT INTO audit_issues \
          (audit_run_id, rule_id, severity, line_number, line_content, description, file_path, \
           object_id, object_type, object_package, object_member, object_container, \
-          category, confidence, cwe) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+          category, confidence, cwe, trace_json) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
     )?;
     for issue in issues {
         let (object_id, object_type, object_package, object_member, object_container) =
@@ -172,6 +172,10 @@ fn insert_issues_in_tx(conn: &Connection, run_id: i64, issues: &[Issue]) -> Resu
             issue.category,
             issue.confidence,
             issue.cwe.map(|cwe| cwe as i64),
+            issue
+                .trace
+                .as_ref()
+                .and_then(|trace| serde_json::to_string(trace).ok()),
         ])?;
     }
     Ok(())
@@ -243,6 +247,7 @@ fn row_to_issue(r: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
     let category: Option<String> = r.get(11)?;
     let confidence: Option<String> = r.get(12)?;
     let cwe: Option<i64> = r.get(13)?;
+    let trace_json: Option<String> = r.get(14)?;
 
     let object = object_id.map(|id| gx_core::models::ObjectRef {
         id,
@@ -266,12 +271,15 @@ fn row_to_issue(r: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
         category,
         confidence,
         cwe: cwe.map(|value| value as u32),
+        trace: trace_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok()),
     })
 }
 
 const ISSUE_COLUMNS: &str = "ai.rule_id, ai.line_number, ai.line_content, ai.description, \
      ai.file_path, ai.severity, ai.object_id, ai.object_type, ai.object_package, \
-     ai.object_member, ai.object_container, ai.category, ai.confidence, ai.cwe, ai.id";
+     ai.object_member, ai.object_container, ai.category, ai.confidence, ai.cwe, ai.trace_json, ai.id";
 
 /// Issues for a given run, ordered by severity.
 ///
@@ -313,8 +321,8 @@ pub fn get_issues_page(
             let rows = stmt.query_map(
                 rusqlite::params![run_id, cursor.rank as i64, cursor.id, fetch],
                 |r| {
-                    let id: i64 = r.get(14)?;
-                    let rank: i64 = r.get(15)?;
+                    let id: i64 = r.get(15)?;
+                    let rank: i64 = r.get(16)?;
                     Ok((row_to_issue(r)?, rank as u8, id))
                 },
             )?;
@@ -329,8 +337,8 @@ pub fn get_issues_page(
                  ORDER BY {ISSUE_RANK_SQL}, ai.id LIMIT ?2"
             ))?;
             let rows = stmt.query_map(rusqlite::params![run_id, fetch], |r| {
-                let id: i64 = r.get(14)?;
-                let rank: i64 = r.get(15)?;
+                let id: i64 = r.get(15)?;
+                let rank: i64 = r.get(16)?;
                 Ok((row_to_issue(r)?, rank as u8, id))
             })?;
             for row in rows {
@@ -478,6 +486,7 @@ mod tests {
             category: None,
             confidence: None,
             cwe: None,
+            trace: None,
         }
     }
 
@@ -515,6 +524,7 @@ mod tests {
             category: None,
             confidence: None,
             cwe: None,
+            trace: None,
         }
     }
 

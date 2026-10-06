@@ -38,6 +38,7 @@ fn gui_request(inputs: Vec<PathBuf>, record_history: bool) -> AnalysisRequest {
             max_error_pct: 10.0,
         },
         record_history,
+        retain_sensitive_evidence: false,
     }
 }
 
@@ -326,6 +327,7 @@ fn history_keyset_pagination_and_invalid_handles() {
                 category: None,
                 confidence: None,
                 cwe: None,
+                trace: None,
             })
             .collect();
         audit_dao::persist_run(&mut conn, &run, &issues).unwrap();

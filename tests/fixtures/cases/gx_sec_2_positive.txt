@@ -1,0 +1,3 @@
+parm(in:&Filtro)
+&sql = 'select * from Cliente where nombre = ' + &Filtro
+&Result = &sql.Execute()

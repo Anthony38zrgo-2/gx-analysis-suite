@@ -73,6 +73,16 @@ impl ObjectFacts<'_> {
     }
 }
 
+/// Cobertura declarada por un pack tras analizar un objeto (D03).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CoverageHint {
+    /// Objetos que el pack decidió no analizar (p. ej. cobertura incompleta).
+    pub skipped_unsupported: usize,
+    /// Llamadas no modeladas sobre valores contaminados (semántica de
+    /// sanitizador desconocida, taint conservador).
+    pub unsupported_sanitizers: usize,
+}
+
 /// Anything that exposes a line number + content (both `ParsedLine` and
 /// `SourceLine` implement it), so `make_issue` can be called with either.
 pub trait LineInfo {
@@ -119,6 +129,7 @@ pub fn make_issue(
         category: None,
         confidence: None,
         cwe: None,
+        trace: None,
     }
 }
 
@@ -209,6 +220,10 @@ pub trait Rule: Send + Sync {
     fn analyze_object(&mut self, _facts: &ObjectFacts<'_>, _ctx: &AuditContext) -> Vec<Issue> {
         vec![]
     }
+    /// Cobertura declarada tras `analyze_object` (D03).
+    fn coverage_hint(&self) -> CoverageHint {
+        CoverageHint::default()
+    }
     fn finalize(&mut self, _ctx: &AuditContext) -> Vec<Issue> {
         vec![]
     }
@@ -264,6 +279,7 @@ macro_rules! define_rule {
         reset = $reset:expr,
         evaluate = $eval:expr
         $(, analyze = $analyze:expr)?
+        $(, coverage = $coverage:expr)?
         $(, finalize = $fin:expr)?
         $(,)?
     ) => {
@@ -352,6 +368,12 @@ macro_rules! define_rule {
             ) -> ::std::vec::Vec<$crate::base::Issue> {
                 $( return ($analyze)(self, facts, ctx); )?
                 ::std::vec::Vec::new()
+            }
+
+            #[allow(unused_variables, unreachable_code)]
+            fn coverage_hint(&self) -> $crate::base::CoverageHint {
+                $( return ($coverage)(self); )?
+                $crate::base::CoverageHint::default()
             }
 
             #[allow(unused_variables, unreachable_code)]

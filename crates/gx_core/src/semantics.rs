@@ -327,7 +327,9 @@ fn is_ident_start(c: char) -> bool {
 }
 
 fn is_ident_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '.'
+    // El punto NO forma parte del identificador: `&sql.Execute()` debe
+    // tokenizarse como variable + método para el dataflow (D03).
+    c.is_alphanumeric() || c == '_'
 }
 
 /// Tokeniza una línea (sin comentarios, con strings). `order` es la posición

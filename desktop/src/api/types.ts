@@ -25,6 +25,8 @@ export interface Issue {
   confidence?: string;
   /** D03: CWE cuando está justificado. */
   cwe?: number;
+  /** D03: traza acotada source→sink de un hallazgo de dataflow. */
+  trace?: TraceStep[];
 }
 
 /** D01: cobertura de un pack semántico/seguridad. */
@@ -34,6 +36,8 @@ export interface PackCoverage {
   objects_analyzed: number;
   skipped_unsupported: number;
   findings: number;
+  /** D03: llamadas no modeladas sobre valores contaminados. */
+  unsupported_sanitizers?: number;
 }
 
 /** D03: resumen de seguridad separado del veredicto de estilo. */
@@ -62,6 +66,15 @@ export interface AnalysisRequest {
   enabled_rule_ids: string[];
   policy: QgPolicy;
   record_history: boolean;
+  /** D03: retención opt-in de evidencia sensible (default false: redactada). */
+  retain_sensitive_evidence?: boolean;
+}
+
+/** D03: paso de una traza acotada source→sink. */
+export interface TraceStep {
+  kind: string;
+  line: number;
+  detail: string;
 }
 
 export interface ScanFailure {

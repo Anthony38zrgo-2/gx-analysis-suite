@@ -88,6 +88,7 @@ mod tests {
                 max_warnings: 999_999,
             },
             record_history: false,
+            retain_sensitive_evidence: false,
         };
         AnalysisResult {
             schema_version: 1,
@@ -104,6 +105,7 @@ mod tests {
                 category: None,
                 confidence: None,
                 cwe: None,
+                trace: None,
             }],
             metrics: AuditMetrics {
                 total_findings: 1,

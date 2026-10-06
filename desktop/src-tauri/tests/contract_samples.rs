@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use gx_core::models::{
     AnalysisRequest, AnalysisResult, AuditMetrics, Issue, ObjectRef, PackCoverage, QgPolicy,
-    QgVerdict, ScanCompletion, ScanCoverage, SecuritySummary, Severity,
+    QgVerdict, ScanCompletion, ScanCoverage, SecuritySummary, Severity, TraceStep,
 };
 use gx_linter_desktop_lib::commands::{
     FindingsPageDto, HistoryIssuesPageDto, ObjectSegmentDto, ObjectWindowDto, ScanSummaryDto,
@@ -33,6 +33,7 @@ fn sample_request() -> AnalysisRequest {
             max_error_pct: 10.0,
         },
         record_history: false,
+        retain_sensitive_evidence: false,
     }
 }
 
@@ -54,6 +55,7 @@ fn sample_issue() -> Issue {
         category: None,
         confidence: None,
         cwe: None,
+        trace: None,
     }
 }
 
@@ -77,6 +79,18 @@ fn sample_security_issue() -> Issue {
         category: Some("security".to_string()),
         confidence: Some("high".to_string()),
         cwe: Some(798),
+        trace: Some(vec![
+            TraceStep {
+                kind: "source".to_string(),
+                line: 10,
+                detail: "parm entrada &password".to_string(),
+            },
+            TraceStep {
+                kind: "sink".to_string(),
+                line: 12,
+                detail: "write".to_string(),
+            },
+        ]),
     }
 }
 
@@ -112,6 +126,7 @@ fn sample_result() -> AnalysisResult {
             objects_analyzed: 1,
             skipped_unsupported: 0,
             findings: 1,
+            unsupported_sanitizers: 1,
         }],
         security: Some(SecuritySummary {
             findings: 1,

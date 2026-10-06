@@ -124,6 +124,7 @@ mod tests {
                 max_warnings: 0,
             },
             record_history: false,
+            retain_sensitive_evidence: false,
         }
     }
 

@@ -223,7 +223,9 @@ fn concrete_rules_are_covered_by_manifest() {
         .map(|r| r.id().to_string())
         .collect();
     assert!(
-        packs.contains(&"GX.2.7.5".to_string()) && packs.contains(&"GX.SEC.1".to_string()),
+        packs.contains(&"GX.2.7.5".to_string())
+            && packs.contains(&"GX.SEC.1".to_string())
+            && packs.contains(&"GX.SEC.2".to_string()),
         "los packs D01/D03 deben estar en el catálogo: {packs:?}"
     );
 }

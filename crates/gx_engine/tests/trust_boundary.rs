@@ -37,6 +37,7 @@ fn request(inputs: Vec<PathBuf>, rules: Vec<String>) -> AnalysisRequest {
             max_warnings: 999,
         },
         record_history: false,
+        retain_sensitive_evidence: false,
     }
 }
 

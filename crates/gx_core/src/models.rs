@@ -105,6 +105,15 @@ impl SourceObject {
     }
 }
 
+/// Paso de una traza acotada source→sink (D03).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceStep {
+    /// "source" | "propagate" | "sink" | "unsupported_call".
+    pub kind: String,
+    pub line: u32,
+    pub detail: String,
+}
+
 /// Un hallazgo (issue) del análisis.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Issue {
@@ -127,6 +136,9 @@ pub struct Issue {
     /// CWE asociado cuando está justificado (D03).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwe: Option<u32>,
+    /// Traza acotada source→sink de un hallazgo de dataflow (D03).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<Vec<TraceStep>>,
 }
 
 /// Métricas consolidadas del análisis.
@@ -246,6 +258,10 @@ pub struct AnalysisRequest {
     pub policy: QgPolicy,
     /// Persistir historial de auditoría (modo CI/read-only = false).
     pub record_history: bool,
+    /// D03: retención OPT-IN de evidencia sensible. Por defecto `false`: los
+    /// valores secretos se redactan siempre en la evidencia emitida.
+    #[serde(default)]
+    pub retain_sensitive_evidence: bool,
 }
 
 /// Fallo de scan de un input concreto (nunca se reporta como escaneo limpio).
@@ -297,6 +313,10 @@ pub struct PackCoverage {
     pub objects_analyzed: usize,
     pub skipped_unsupported: usize,
     pub findings: usize,
+    /// Llamadas no modeladas sobre valores contaminados (D03): la semántica
+    /// de sanitizador es DESCONOCIDA y el taint se conserva conservadoramente.
+    #[serde(default)]
+    pub unsupported_sanitizers: usize,
 }
 
 /// Resumen de seguridad separado de la política de estilo (D03): un hallazgo
@@ -482,6 +502,7 @@ mod tests {
                 category: None,
                 confidence: None,
                 cwe: None,
+                trace: None,
             },
             Issue {
                 rule_id: "GX.2".into(),
@@ -494,6 +515,7 @@ mod tests {
                 category: None,
                 confidence: None,
                 cwe: None,
+                trace: None,
             },
             Issue {
                 rule_id: "GX.3".into(),
@@ -506,6 +528,7 @@ mod tests {
                 category: None,
                 confidence: None,
                 cwe: None,
+                trace: None,
             },
             Issue {
                 rule_id: "GX.4".into(),
@@ -518,6 +541,7 @@ mod tests {
                 category: None,
                 confidence: None,
                 cwe: None,
+                trace: None,
             },
         ];
         let m = AuditMetrics::from_issues(&issues);

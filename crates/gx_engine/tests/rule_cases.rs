@@ -285,6 +285,16 @@ const GREEN_CASES: &[Case] = &[
         rule: "GX.SEC.1",
         expect_fires: false,
     },
+    Case {
+        file: "gx_sec_2_positive.txt",
+        rule: "GX.SEC.2",
+        expect_fires: true,
+    },
+    Case {
+        file: "gx_sec_2_negative.txt",
+        rule: "GX.SEC.2",
+        expect_fires: false,
+    },
 ];
 
 /// Cada regla concreta del registry está ejercitada por al menos un caso
@@ -297,8 +307,8 @@ fn all_concrete_rules_have_green_cases() {
         .filter(|r| !r.is_abstract())
         .map(|r| r.id())
         .collect();
-    // D01: 24 reglas de línea + packs de objeto (D02/D03) = 26 concretas.
-    assert_eq!(concrete.len(), 26);
+    // D01: 24 reglas de línea + packs de objeto (D02/D03) = 27 concretas.
+    assert_eq!(concrete.len(), 27);
     for id in concrete {
         assert!(
             covered.contains(id),

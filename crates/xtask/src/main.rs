@@ -308,6 +308,7 @@ fn bench(args: &[String]) -> Result<()> {
             max_warnings: u32::MAX,
         },
         record_history: false,
+        retain_sensitive_evidence: false,
     };
     let budget = ExecutionBudget::default();
 

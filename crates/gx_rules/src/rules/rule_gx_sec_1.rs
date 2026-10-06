@@ -90,7 +90,14 @@ define_rule! {
     struct RuleGxSec1 {},
     reset = |_me: &mut RuleGxSec1, _file: &Path| {},
     evaluate = |_me: &mut RuleGxSec1, _line: &ParsedLine, _ctx: &AuditContext| vec![],
-    analyze = |me: &mut RuleGxSec1, facts: &ObjectFacts, _ctx: &AuditContext| {
+    analyze = |me: &mut RuleGxSec1, facts: &ObjectFacts, ctx: &AuditContext| {
+        // D03: la evidencia sensible se redacta SIEMPRE por defecto; la
+        // retención sin redactar es opt-in explícito del usuario.
+        let retain_evidence = ctx
+            .extra_settings
+            .get("security.retain_evidence")
+            .map(|value| value == "true")
+            .unwrap_or(false);
         let Some(model) = facts.model else {
             return vec![];
         };
@@ -143,7 +150,11 @@ define_rule! {
                     rule_id: me.id().to_string(),
                     severity: me.severity(),
                     line_number: line,
-                    line_content: redact(raw, &literal.text),
+                    line_content: if retain_evidence {
+                        raw.to_string()
+                    } else {
+                        redact(raw, &literal.text)
+                    },
                     description: format!(
                         "Se detectó un valor sensible embebido en '{}' (patrón de credencial, CWE-798). \
                          Parametrizar desde configuración segura y rotar el secreto.",
@@ -157,6 +168,7 @@ define_rule! {
                     category: Some("security".to_string()),
                     confidence: Some("high".to_string()),
                     cwe: Some(798),
+                    trace: None,
                 });
             }
         }

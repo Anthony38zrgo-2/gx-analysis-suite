@@ -179,12 +179,16 @@ fn evaluate_object(
                 objects_analyzed: 0,
                 skipped_unsupported: 0,
                 findings: 0,
+                unsupported_sanitizers: 0,
             };
             if !facts.has(capability.facts) {
                 coverage.skipped_unsupported = 1;
             } else {
                 let result = rule.analyze_object(&facts, ctx);
+                let hint = rule.coverage_hint();
                 coverage.objects_analyzed = 1;
+                coverage.skipped_unsupported = hint.skipped_unsupported;
+                coverage.unsupported_sanitizers = hint.unsupported_sanitizers;
                 coverage.findings = result.len();
                 if !result.is_empty() {
                     gx_core::stats::note_first_finding();
@@ -403,6 +407,7 @@ fn merge_pack_coverage(accumulated: &mut Vec<PackCoverage>, from_object: Vec<Pac
                 existing.objects_analyzed += coverage.objects_analyzed;
                 existing.skipped_unsupported += coverage.skipped_unsupported;
                 existing.findings += coverage.findings;
+                existing.unsupported_sanitizers += coverage.unsupported_sanitizers;
             }
             None => accumulated.push(coverage),
         }
@@ -657,6 +662,17 @@ pub fn analyze_with_options(
         gx_core::models::QgPolicy::Percentage { max_error_pct } => (0, u32::MAX, *max_error_pct),
     };
 
+    // D03: la retención sin redactar es opt-in y viaja por el contexto.
+    let extra_settings: std::collections::HashMap<String, String> =
+        if request.retain_sensitive_evidence {
+            std::collections::HashMap::from([(
+                "security.retain_evidence".to_string(),
+                "true".to_string(),
+            )])
+        } else {
+            Default::default()
+        };
+
     let outcomes = evaluate_files_parallel_with_ctx(
         &inputs,
         &enabled,
@@ -666,7 +682,7 @@ pub fn analyze_with_options(
             max_errors,
             max_warnings,
             qg_threshold_pct,
-            extra_settings: Default::default(),
+            extra_settings: extra_settings.clone(),
         },
         on_progress,
         cancel,

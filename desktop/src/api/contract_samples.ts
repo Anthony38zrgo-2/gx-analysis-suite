@@ -23,6 +23,7 @@ export const requestSample: AnalysisRequest = {
     "max_error_pct": 10.0
   },
   "record_history": false,
+  "retain_sensitive_evidence": false,
   "schema_version": 1
 };
 
@@ -69,7 +70,19 @@ export const resultSample: AnalysisResult = {
         "package": "PkgDemo"
       },
       "rule_id": "GX.SEC.1",
-      "severity": "ERROR"
+      "severity": "ERROR",
+      "trace": [
+        {
+          "detail": "parm entrada &password",
+          "kind": "source",
+          "line": 10
+        },
+        {
+          "detail": "write",
+          "kind": "sink",
+          "line": 12
+        }
+      ]
     }
   ],
   "metrics": {
@@ -84,6 +97,7 @@ export const resultSample: AnalysisResult = {
       "id": "GX.SEC.1",
       "objects_analyzed": 1,
       "skipped_unsupported": 0,
+      "unsupported_sanitizers": 1,
       "version": "1.0"
     }
   ],
@@ -104,6 +118,7 @@ export const resultSample: AnalysisResult = {
       "max_error_pct": 10.0
     },
     "record_history": false,
+    "retain_sensitive_evidence": false,
     "schema_version": 1
   },
   "scanned_files": 1,
@@ -141,6 +156,7 @@ export const summarySample: ScanSummary = {
       "id": "GX.SEC.1",
       "objects_analyzed": 1,
       "skipped_unsupported": 0,
+      "unsupported_sanitizers": 1,
       "version": "1.0"
     }
   ],
@@ -161,6 +177,7 @@ export const summarySample: ScanSummary = {
       "max_error_pct": 10.0
     },
     "record_history": false,
+    "retain_sensitive_evidence": false,
     "schema_version": 1
   },
   "scanned_files": 1,

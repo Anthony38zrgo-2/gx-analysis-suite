@@ -72,6 +72,10 @@ enum Commands {
         /// Persiste el historial de auditoría en la base local.
         #[arg(long)]
         record_history: bool,
+        /// D03: retiene evidencia sensible SIN redactar (opt-in explícito).
+        /// Por defecto los secretos se redactan en la evidencia emitida.
+        #[arg(long)]
+        retain_sensitive_evidence: bool,
         /// Base de datos local alternativa (para pruebas/uso avanzado).
         #[arg(long, value_name = "DB")]
         db: Option<String>,
@@ -157,6 +161,7 @@ fn run(cli: Cli) -> Result<i32> {
             rules_profile,
             rules_csv,
             record_history,
+            retain_sensitive_evidence,
             db,
             pdf,
         } => cmd_scan(
@@ -171,6 +176,7 @@ fn run(cli: Cli) -> Result<i32> {
             &rules_profile,
             rules_csv.as_deref(),
             record_history,
+            retain_sensitive_evidence,
             db.as_deref(),
             pdf.as_deref(),
         ),
@@ -241,6 +247,7 @@ fn cmd_scan(
     profile: &str,
     rules_csv: Option<&str>,
     record_history: bool,
+    retain_sensitive_evidence: bool,
     db: Option<&str>,
     pdf: Option<&str>,
 ) -> Result<i32> {
@@ -279,6 +286,7 @@ fn cmd_scan(
         enabled_rule_ids: effective_rules(rules_csv, profile, db, enable, disable)?,
         policy,
         record_history,
+        retain_sensitive_evidence,
     };
 
     // A01/F01: la validación compartida rechaza esquema, reglas y política

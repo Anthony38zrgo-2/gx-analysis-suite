@@ -13,6 +13,7 @@ fn request(inputs: &[&str], policy: QgPolicy, record_history: bool) -> AnalysisR
             .collect(),
         policy,
         record_history,
+        retain_sensitive_evidence: false,
     }
 }
 

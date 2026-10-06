@@ -11,14 +11,16 @@ const MIGRATION_V1: &str = include_str!("../../../migrations/V001__initial_schem
 const MIGRATION_V2: &str = include_str!("../../../migrations/V002__seed_rules_and_settings.sql");
 const MIGRATION_V3: &str = include_str!("../../../migrations/V003__audit_object_identity.sql");
 const MIGRATION_V4: &str = include_str!("../../../migrations/V004__audit_security_metadata.sql");
+const MIGRATION_V5: &str = include_str!("../../../migrations/V005__audit_trace.sql");
 
-/// Todas las migraciones, en orden (V001→V004).
+/// Todas las migraciones, en orden (V001→V005).
 pub fn all_migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_V1),
         M::up(MIGRATION_V2),
         M::up(MIGRATION_V3),
         M::up(MIGRATION_V4),
+        M::up(MIGRATION_V5),
     ])
 }
 
@@ -101,8 +103,8 @@ pub fn get_pool() -> Result<SqlitePool> {
 mod tests {
     use super::*;
 
-    /// GX-009/D01: una base fresca tiene 32 filas de catálogo (26 concretas:
-    /// 24 reglas de línea + 2 packs opt-in) y exactamente 15 habilitadas.
+    /// GX-009/D01: una base fresca tiene 33 filas de catálogo (27 concretas:
+    /// 24 reglas de línea + 3 packs opt-in) y exactamente 15 habilitadas.
     #[test]
     fn fresh_db_has_full_catalog() {
         let conn = init_memory_db().unwrap();
@@ -113,7 +115,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(concrete, 26);
+        assert_eq!(concrete, 27);
         let enabled: usize = conn
             .query_row(
                 "SELECT COUNT(*) FROM rules WHERE is_abstract = 0 AND enabled = 1",

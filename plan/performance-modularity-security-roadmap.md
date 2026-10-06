@@ -622,3 +622,41 @@ All probes above are now regression tests.
   both packs and a CLI redaction test.
 - Global project-wide taint/graph limits (D04 deep profile) remain opt-in and
   are not implemented; no global dataflow claims are made.
+
+## 12. Implementation log — D03 completion (local taint)
+
+**D03 — Bounded local taint flow.**
+- `gx_core::security` implements intra-object taint over the D02 semantic
+  model with a documented API subset: sources are `parm(in|inout)` parameters
+  and request containers (`&httpRequest…`, `&webSession…`, `&httpContext…`);
+  sinks cover SQL execution (CWE-89), OS command execution (CWE-78), file
+  methods (CWE-22) and response writes (CWE-79); a small list of neutral
+  functions (trim/ToString/concat/format/…) propagates taint without being
+  treated as sanitizers.
+- Bounds: `MAX_PASSES = 4` fixpoint iterations, `MAX_TRACE = 8` steps per
+  trace and `MAX_FINDINGS = 32` per object; the analysis is strictly
+  intra-object (no interprocedural claims).
+- Every dataflow finding carries `trace` (source → propagate → sink steps with
+  lines) plus category/confidence/CWE. Unmodeled calls on tainted values are
+  conservative: taint is preserved, the trace includes an `unsupported_call`
+  step, confidence drops to `low` and `PackCoverage.unsupported_sanitizers`
+  makes the gap visible.
+- The new opt-in pack `GX.SEC.2` (disabled by default, `cost = deep`) wraps the
+  analysis; the standard 15-rule profile still performs zero semantic work.
+  `coverage_hint()` lets a pack report skipped/unsupported coverage through
+  the engine.
+- Redaction/retention: secret values are redacted by default; the new
+  `AnalysisRequest.retain_sensitive_evidence` (CLI
+  `--retain-sensitive-evidence`) is the explicit opt-in that keeps raw
+  evidence, and migration V005 persists bounded traces in history.
+- Fixtures: safe/unsafe cases per class (`gx_sec_2_positive/negative`),
+  semantics/security unit tests (trace bounds, out params, parameterized SQL,
+  unknown sanitizer) and `phase_d.rs` assertions for the end-to-end flow,
+  conservative sanitizers and opt-in retention. The `real` corpus benchmark
+  keeps 549 findings (no new false positives on real exports).
+
+**Verification (D03 completion).**
+- `cargo test --workspace`: 160 tests passed; desktop workspace: 15 + contract
+  test; `npm run build` (vue-tsc + vite): passed; clippy/fmt clean in both
+  workspaces; MSRV 1.89 and `check-boundaries`: clean; bench gates pass for
+  `small-files` and `real` (facts once per object, findings preserved).

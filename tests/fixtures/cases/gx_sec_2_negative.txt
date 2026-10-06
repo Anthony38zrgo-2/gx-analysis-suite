@@ -1,0 +1,6 @@
+parm(in:&Filtro, out:&Salida)
+&sql = 'select * from Cliente where nombre = ?'
+&Result = &sql.Execute()
+&copia = &Salida
+&sql2 = &copia
+&sql2.Execute()

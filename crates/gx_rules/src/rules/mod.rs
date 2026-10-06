@@ -32,3 +32,4 @@ pub mod rule_gx_2_7_3;
 pub mod rule_gx_2_7_4;
 pub mod rule_gx_2_7_5;
 pub mod rule_gx_sec_1;
+pub mod rule_gx_sec_2;

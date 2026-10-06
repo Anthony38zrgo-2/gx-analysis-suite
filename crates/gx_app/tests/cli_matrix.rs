@@ -354,6 +354,46 @@ fn scan_security_pack_redacts_and_rejects() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// D03: la retención de evidencia sensible es opt-in explícito; por defecto
+/// los secretos se redactan en la salida.
+#[test]
+fn scan_retain_sensitive_evidence_is_opt_in() {
+    let dir = std::env::temp_dir().join("gx_cli_retain_evidence");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("secret.txt");
+    std::fs::write(&file, "&password = 'S3cr3t-Value!'\n").unwrap();
+
+    let redacted = gx(&[
+        "scan",
+        "--file",
+        file.to_str().unwrap(),
+        "--enable",
+        "GX.SEC.1",
+        "--format",
+        "json",
+    ]);
+    assert!(!redacted.stdout.contains("S3cr3t-Value!"));
+
+    let retained = gx(&[
+        "scan",
+        "--file",
+        file.to_str().unwrap(),
+        "--enable",
+        "GX.SEC.1",
+        "--retain-sensitive-evidence",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        retained.stdout.contains("S3cr3t-Value!"),
+        "la retención opt-in conserva la evidencia: {}",
+        retained.stderr
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Filtros de reglas: --enable domina al set por defecto.
 #[test]
 fn enable_filter_selects_rules() {
@@ -428,7 +468,7 @@ fn rules_list_from_csv() {
     let out = gx(&["rules", "list", "--rules-csv", csv.to_str().unwrap()]);
     assert_eq!(out.code, 0);
     assert!(out.stdout.contains("GX.2.6"));
-    assert!(out.stdout.contains("26 reglas operativas"));
+    assert!(out.stdout.contains("27 reglas operativas"));
 }
 
 /// XPZ real empaquetado como RAR: se lintea con identidad de objeto real.

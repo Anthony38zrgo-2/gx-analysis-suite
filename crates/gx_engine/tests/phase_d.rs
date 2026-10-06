@@ -26,6 +26,7 @@ fn request(inputs: Vec<PathBuf>, rules: &[&str], pct: f32) -> AnalysisRequest {
         enabled_rule_ids: rules.iter().map(|id| id.to_string()).collect(),
         policy: QgPolicy::Percentage { max_error_pct: pct },
         record_history: false,
+        retain_sensitive_evidence: false,
     }
 }
 
@@ -145,6 +146,63 @@ fn phase_d_capability_gates_facts_and_security() {
     assert_eq!(dead_result.findings.len(), 1);
     assert_eq!(dead_result.findings[0].line_number, 1);
     assert_eq!(dead_result.pack_coverage[0].objects_analyzed, 1);
+
+    // ── D03: dataflow local con traza source→sink (GX.SEC.2) ──────────────
+    let sqli = dir.join("sqli.txt");
+    std::fs::write(
+        &sqli,
+        "parm(in:&Filtro)\n\
+         &sql = 'select * from Cliente where nombre = ' + &Filtro\n\
+         &Result = &sql.Execute()\n",
+    )
+    .unwrap();
+    let taint = analyze(&request(vec![sqli], &["GX.SEC.2"], 100.0));
+    assert_eq!(taint.findings.len(), 1, "{}", taint.findings.len());
+    let issue = &taint.findings[0];
+    assert_eq!(issue.cwe, Some(89));
+    assert_eq!(issue.category.as_deref(), Some("security"));
+    assert_eq!(issue.confidence.as_deref(), Some("medium"));
+    let trace = issue.trace.as_ref().expect("traza source→sink");
+    assert_eq!(trace.first().unwrap().kind, "source");
+    assert_eq!(trace.first().unwrap().line, 1);
+    assert_eq!(trace.last().unwrap().kind, "sink");
+    assert_eq!(trace.last().unwrap().line, 3);
+    assert_eq!(taint.security.as_ref().unwrap().errors, 1);
+    assert_eq!(taint.verdict, QgVerdict::Reject);
+
+    // Sanitizador no modelado: conservador, visible y con confidence low.
+    let unknown = dir.join("unknown_sanitizer.txt");
+    std::fs::write(
+        &unknown,
+        "parm(in:&Filtro)\n\
+         &safe = MiSanitizador(&Filtro)\n\
+         &sql = &safe\n\
+         &sql.Execute()\n",
+    )
+    .unwrap();
+    let conservative = analyze(&request(vec![unknown], &["GX.SEC.2"], 100.0));
+    assert_eq!(conservative.findings.len(), 1);
+    assert_eq!(conservative.findings[0].confidence.as_deref(), Some("low"));
+    assert_eq!(conservative.pack_coverage[0].unsupported_sanitizers, 1);
+    assert!(conservative.findings[0]
+        .trace
+        .as_ref()
+        .unwrap()
+        .iter()
+        .any(|step| step.kind == "unsupported_call"));
+
+    // D03: la retención sin redactar es opt-in; por defecto se redacta.
+    let secret = dir.join("secret.txt");
+    std::fs::write(&secret, "&password = 'S3cr3t!'\n").unwrap();
+    let redacted = analyze(&request(vec![secret.clone()], &["GX.SEC.1"], 100.0));
+    assert!(!redacted.findings[0].line_content.contains("S3cr3t!"));
+    let mut retain_request = request(vec![secret], &["GX.SEC.1"], 100.0);
+    retain_request.retain_sensitive_evidence = true;
+    let retained = analyze(&retain_request);
+    assert!(
+        retained.findings[0].line_content.contains("S3cr3t!"),
+        "retención opt-in explícita"
+    );
 
     // ── D03: sin pack de seguridad no hay resumen ni costo ────────────────
     stats::reset();

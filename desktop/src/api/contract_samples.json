@@ -98,6 +98,7 @@
       "max_error_pct": 10.0
     },
     "record_history": false,
+    "retain_sensitive_evidence": false,
     "schema_version": 1
   },
   "result": {
@@ -143,7 +144,19 @@
           "package": "PkgDemo"
         },
         "rule_id": "GX.SEC.1",
-        "severity": "ERROR"
+        "severity": "ERROR",
+        "trace": [
+          {
+            "detail": "parm entrada &password",
+            "kind": "source",
+            "line": 10
+          },
+          {
+            "detail": "write",
+            "kind": "sink",
+            "line": 12
+          }
+        ]
       }
     ],
     "metrics": {
@@ -158,6 +171,7 @@
         "id": "GX.SEC.1",
         "objects_analyzed": 1,
         "skipped_unsupported": 0,
+        "unsupported_sanitizers": 1,
         "version": "1.0"
       }
     ],
@@ -178,6 +192,7 @@
         "max_error_pct": 10.0
       },
       "record_history": false,
+      "retain_sensitive_evidence": false,
       "schema_version": 1
     },
     "scanned_files": 1,
@@ -214,6 +229,7 @@
         "id": "GX.SEC.1",
         "objects_analyzed": 1,
         "skipped_unsupported": 0,
+        "unsupported_sanitizers": 1,
         "version": "1.0"
       }
     ],
@@ -234,6 +250,7 @@
         "max_error_pct": 10.0
       },
       "record_history": false,
+      "retain_sensitive_evidence": false,
       "schema_version": 1
     },
     "scanned_files": 1,

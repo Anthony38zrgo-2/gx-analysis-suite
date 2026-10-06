@@ -9,6 +9,7 @@ pub mod budget;
 pub mod lexical;
 pub mod models;
 pub mod regex_cache;
+pub mod security;
 pub mod semantics;
 pub mod stats;
 pub mod summary;
