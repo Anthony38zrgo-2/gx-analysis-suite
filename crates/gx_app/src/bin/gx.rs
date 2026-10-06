@@ -43,7 +43,8 @@ enum Commands {
         /// Compatibilidad con el CLI anterior: --file <ruta>.
         #[arg(long, value_name = "PATH")]
         file: Option<String>,
-        /// Formato de salida: text | json (stdout = un documento JSON).
+        /// Formato de salida: text | json | ndjson (un finding por línea y
+        /// una línea final de resumen).
         #[arg(long, default_value = "text", value_name = "FMT")]
         format: String,
         /// Política absolute: máximo de errores permitidos.
@@ -248,8 +249,8 @@ fn cmd_scan(
         eprintln!("[gx] falta la ruta: `gx scan <ruta>` o `gx scan --file <ruta>`");
         return Ok(EXIT_INVALID);
     };
-    if !matches!(format, "text" | "json") {
-        eprintln!("[gx] formato inválido '{format}' (esperado text|json)");
+    if !matches!(format, "text" | "json" | "ndjson") {
+        eprintln!("[gx] formato inválido '{format}' (esperado text|json|ndjson)");
         return Ok(EXIT_INVALID);
     }
     let path = PathBuf::from(path_str);
@@ -311,8 +312,33 @@ fn cmd_scan(
     match format {
         "json" => {
             // STDOUT = un documento JSON completo; progreso/errores a stderr.
+            // C01: el framing de `json` NO cambia.
             serde_json::to_writer_pretty(std::io::stdout().lock(), &result)?;
             println!();
+        }
+        "ndjson" => {
+            // C01: streaming separado y documentado; un finding por línea y
+            // una línea final de resumen con el veredicto y la cobertura.
+            use std::io::Write;
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            for issue in &result.findings {
+                serde_json::to_writer(&mut lock, issue)?;
+                lock.write_all(b"\n")?;
+            }
+            let summary = serde_json::json!({
+                "type": "summary",
+                "schema_version": result.schema_version,
+                "scanned_files": result.scanned_files,
+                "metrics": result.metrics,
+                "verdict": result.verdict,
+                "failures": result.failures,
+                "coverage": result.coverage,
+                "completion": result.completion,
+                "findings_total": result.findings.len(),
+            });
+            serde_json::to_writer(&mut lock, &summary)?;
+            lock.write_all(b"\n")?;
         }
         _ => print!("{}", gx_core::summary::text_summary(&result)),
     }

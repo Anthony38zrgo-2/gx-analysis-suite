@@ -293,6 +293,29 @@ fn json_output_is_deterministic() {
     );
 }
 
+/// C01: `--format ndjson` emite un finding por línea + una línea final de
+/// resumen, sin cambiar el framing de `--format json`.
+#[test]
+fn scan_ndjson_streams_findings_and_summary() {
+    let fixture = fixtures("sources/ejemplo_codigo.txt");
+    let out = gx(&[
+        "scan",
+        "--file",
+        fixture.to_str().unwrap(),
+        "--format",
+        "ndjson",
+    ]);
+    assert_eq!(out.code, 1, "stderr: {}", out.stderr);
+    let lines: Vec<&str> = out.stdout.lines().collect();
+    assert_eq!(lines.len(), 23 + 1, "23 findings + línea de resumen");
+    let first: Value = serde_json::from_str(lines[0]).unwrap();
+    assert!(first["rule_id"].is_string(), "cada línea es un Issue");
+    let summary: Value = serde_json::from_str(lines[lines.len() - 1]).unwrap();
+    assert_eq!(summary["type"], "summary");
+    assert_eq!(summary["metrics"]["total_findings"], 23);
+    assert_eq!(summary["verdict"], "reject");
+}
+
 /// Filtros de reglas: --enable domina al set por defecto.
 #[test]
 fn enable_filter_selects_rules() {

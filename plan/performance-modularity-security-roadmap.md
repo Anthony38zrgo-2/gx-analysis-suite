@@ -501,3 +501,68 @@ All probes above are now regression tests.
   median 33.2 → 27.2 ms, CPU 359 → 234 ms, allocations 779,155 → 618,439,
   reserved bytes 36.4 → 28.0 MB, factory instances 480 → 288. Harness
   validation only; not a performance claim on real exports.
+
+## 10. Implementation log — Phase C (C01–C04)
+
+**C01 — Bounded results and persistence.**
+- `audit_dao`: issue insertion uses ONE cached prepared statement per run;
+  keyset pagination for runs (`before_id`) and issues (`(severity_rank, id)`
+  cursor); `prune_runs` retention with `ON DELETE CASCADE`; `containers_for_run`
+  for viewer scope. Tests cover cursor walks, retention/cascade and orphan
+  cleanup.
+- Desktop results live in a bounded `SessionStore` (8 sessions / 50k findings);
+  `scan` returns `ScanSummaryDto` (metrics, failures, coverage, completion,
+  `findings_total`, `history_error`) instead of the full result;
+  `get_findings_page` paginates and filters server-side; history exposes
+  keyset commands. Text summary and PDF render from the session id, never from
+  a result replayed by Vue.
+- Persistence is ancillary: a failed save becomes `history_error` (findings are
+  preserved) and cancelled runs are not persisted. The local DB is migrated and
+  seeded once per startup through `gx_storage::db::get_pool_at`.
+- CLI adds `--format ndjson` (one finding per line + a final `type: summary`
+  line); the `json` framing is unchanged.
+
+**C02 — Source access by snapshot identity.**
+- `read_object_window` is scoped to an approved scan session, resolves exactly
+  `(member, id)` with early-stop streaming (later members are never parsed) and
+  returns a bounded line window with physical member coordinates. The
+  unrestricted `read_object_source` command is no longer exposed over IPC.
+- A bounded source cache (8 objects) keyed by canonical container + member +
+  id stores the extraction with a `(len, mtime)` stamp: repeated navigation
+  within an object does not decompress again, and a changed container is
+  re-extracted with `source_modified: true`.
+- History viewing uses `read_history_object_window`, scoped to the containers
+  recorded in that run's issues; unknown ids/sessions/containers fail with
+  `not_found`/`forbidden` instead of falling back to another object.
+
+**C03 — Linear progress and bounded rendering.**
+- The scan store updates progress in a reactive `Map` with batched flushes
+  (50 ms), incremental counters and a 1000-entry cap plus a “truncated”
+  indicator; processing per event is O(1).
+- Findings filtering/pagination happens in Rust; the table renders at most the
+  requested 100-row page, debounces search (200 ms) and emits filter/page
+  changes with a generation guard so stale responses cannot overwrite newer
+  selections.
+- The source viewer renders only a 400-line window and pages adjacent windows
+  on scroll, so DOM size depends on the window, not the file. Page and viewer
+  latencies are recorded (`pageLatencyMs`, `windowLatencyMs`) with best-effort
+  JS heap sampling.
+
+**C04 — Contracts and local command security.**
+- Contract samples: a Rust test generates and verifies
+  `desktop/src/api/contract_samples.json` plus
+  `desktop/src/api/contract_samples.ts`, where the serialized literals are
+  assigned to the frontend types. `vue-tsc` fails on schema drift, and the Rust
+  test fails if either artifact is stale (regeneration is an ignored test).
+- `tauri.conf.json` now sets a restrictive CSP (self-only scripts, IPC
+  connect-src, no objects/frames). Only scoped source-window commands are
+  exposed; request/execution/presentation DTOs stay separate and errors remain
+  typed (`code`/`message`).
+
+**Verification (Phase C).**
+- `cargo test --workspace`: 140 tests passed; desktop workspace: 15 + contract
+  test (+1 ignored generator); `npm run build` (vue-tsc + vite): passed;
+  clippy `-D warnings` and `cargo fmt --check`: clean in both workspaces;
+  MSRV 1.89 check and `check-boundaries`: clean.
+- Bench gates (`small-files`) still pass; engine behavior is unchanged by
+  Phase C (all changes are adapter/persistence/frontend).

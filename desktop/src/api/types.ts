@@ -71,6 +71,66 @@ export interface AnalysisResult {
   completion?: ScanCompletion;
 }
 
+/** C01: cabecera de una sesión de resultados; los findings se piden por
+ * página y nunca viajan completos en una respuesta IPC. */
+export interface ScanSummary {
+  session_id: number;
+  schema_version: number;
+  request: AnalysisRequest;
+  scanned_files: number;
+  metrics: AuditMetrics;
+  failures: ScanFailure[];
+  policy: QgPolicy;
+  verdict: QgVerdict;
+  coverage: ScanCoverage;
+  completion: ScanCompletion;
+  findings_total: number;
+  history_error: string | null;
+}
+
+/** C01/C03: página de findings con filtros resueltos en Rust. */
+export interface FindingsPage {
+  session_id: number;
+  offset: number;
+  limit: number;
+  filtered_total: number;
+  total: number;
+  items: Issue[];
+  rules: string[];
+}
+
+/** C01: página keyset del historial. */
+export interface HistoryIssuesPage {
+  run_id: number;
+  items: Issue[];
+  next_cursor: string | null;
+}
+
+/** C02: línea de una ventana del visor con su línea física en el miembro. */
+export interface SourceWindowLine {
+  text: string;
+  text_line: number;
+  member_line: number;
+}
+
+/** C02: ventana acotada de un objeto del visor. */
+export interface ObjectWindow {
+  session_id: number;
+  id: string;
+  object_type: string;
+  package: string;
+  member: string;
+  container_path: string;
+  code_start_line: number;
+  segments: ObjectSegment[];
+  total_lines: number;
+  window_start: number;
+  window_end: number;
+  lines: SourceWindowLine[];
+  source_modified: boolean;
+  cached: boolean;
+}
+
 export interface RuleRecord {
   id: string;
   raw_id: string;

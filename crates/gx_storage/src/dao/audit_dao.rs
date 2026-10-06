@@ -135,6 +135,14 @@ pub fn insert_issues(conn: &mut Connection, run_id: i64, issues: &[Issue]) -> Re
 }
 
 fn insert_issues_in_tx(conn: &Connection, run_id: i64, issues: &[Issue]) -> Result<()> {
+    // C01: UN statement preparado (cacheado por conexión) para todos los
+    // issues de la corrida; la inserción no re-prepara por fila.
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO audit_issues \
+         (audit_run_id, rule_id, severity, line_number, line_content, description, file_path, \
+          object_id, object_type, object_package, object_member, object_container) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+    )?;
     for issue in issues {
         let (object_id, object_type, object_package, object_member, object_container) =
             match &issue.object {
@@ -147,26 +155,20 @@ fn insert_issues_in_tx(conn: &Connection, run_id: i64, issues: &[Issue]) -> Resu
                 ),
                 None => (None, None, None, None, None),
             };
-        conn.execute(
-            "INSERT INTO audit_issues \
-             (audit_run_id, rule_id, severity, line_number, line_content, description, file_path, \
-              object_id, object_type, object_package, object_member, object_container) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-            rusqlite::params![
-                run_id,
-                issue.rule_id,
-                issue.severity.as_str(),
-                issue.line_number as i64,
-                issue.line_content,
-                issue.description,
-                issue.file_path.to_string_lossy().to_string(),
-                object_id,
-                object_type,
-                object_package,
-                object_member,
-                object_container,
-            ],
-        )?;
+        stmt.execute(rusqlite::params![
+            run_id,
+            issue.rule_id,
+            issue.severity.as_str(),
+            issue.line_number as i64,
+            issue.line_content,
+            issue.description,
+            issue.file_path.to_string_lossy().to_string(),
+            object_id,
+            object_type,
+            object_package,
+            object_member,
+            object_container,
+        ])?;
     }
     Ok(())
 }
@@ -199,12 +201,174 @@ pub struct AuditRunSummary {
 
 /// Most recent runs, newest first.
 pub fn list_runs(conn: &Connection, limit: i64) -> Result<Vec<AuditRunSummary>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, file_path, file_name, started_at, total_findings, errors, warnings, info, \
-                verdict, policy, qg_passed \
-         FROM audit_runs ORDER BY id DESC LIMIT ?1",
-    )?;
-    let rows = stmt.query_map([limit], |r| {
+    list_runs_page(conn, None, limit)
+}
+
+/// Cursor keyset de issues: (rank de severidad, id) (C01).
+///
+/// `rank` ordena ERROR < WARNING < INFO y `id` desempata de forma estable;
+/// la página siguiente se pide con el último cursor visto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IssueCursor {
+    pub rank: u8,
+    pub id: i64,
+}
+
+/// Página de issues históricos con cursor opcional.
+#[derive(Debug, Clone)]
+pub struct IssuesPage {
+    pub items: Vec<Issue>,
+    pub next_cursor: Option<IssueCursor>,
+}
+
+const ISSUE_RANK_SQL: &str =
+    "CASE ai.severity WHEN 'ERROR' THEN 0 WHEN 'WARNING' THEN 1 ELSE 2 END";
+
+fn row_to_issue(r: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
+    let rule_id: String = r.get(0)?;
+    let line_number: i64 = r.get(1)?;
+    let line_content: String = r.get(2)?;
+    let description: String = r.get(3)?;
+    let file_path: String = r.get(4)?;
+    let severity: String = r.get(5)?;
+    let object_id: Option<String> = r.get(6)?;
+    let object_type: Option<String> = r.get(7)?;
+    let object_package: Option<String> = r.get(8)?;
+    let object_member: Option<String> = r.get(9)?;
+    let object_container: Option<String> = r.get(10)?;
+
+    let object = object_id.map(|id| gx_core::models::ObjectRef {
+        id,
+        object_type: object_type.unwrap_or_default(),
+        package: object_package.unwrap_or_default(),
+        member: object_member.unwrap_or_default(),
+        container_path: object_container.unwrap_or_default(),
+    });
+    Ok(Issue {
+        rule_id,
+        line_number: line_number as u32,
+        line_content,
+        description,
+        file_path: std::path::PathBuf::from(file_path),
+        severity: match severity.as_str() {
+            "ERROR" => gx_core::models::Severity::Error,
+            "WARNING" => gx_core::models::Severity::Warning,
+            _ => gx_core::models::Severity::Info,
+        },
+        object,
+    })
+}
+
+const ISSUE_COLUMNS: &str = "ai.rule_id, ai.line_number, ai.line_content, ai.description, \
+     ai.file_path, ai.severity, ai.object_id, ai.object_type, ai.object_package, \
+     ai.object_member, ai.object_container, ai.id";
+
+/// Issues for a given run, ordered by severity.
+///
+/// GX-011: reconstruye la identidad de objeto cuando existe (suficiente
+/// para reabrir el miembro correcto del XPZ en el visor).
+pub fn get_issues_for_run(conn: &Connection, run_id: i64) -> Result<Vec<Issue>> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {ISSUE_COLUMNS} FROM audit_issues ai WHERE ai.audit_run_id = ?1 \
+         ORDER BY {ISSUE_RANK_SQL}, ai.id"
+    ))?;
+    let rows = stmt.query_map([run_id], row_to_issue)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Página keyset de issues de una corrida (C01): `after = None` comienza por
+/// el primero; el cursor se toma de [`IssuesPage::next_cursor`].
+pub fn get_issues_page(
+    conn: &Connection,
+    run_id: i64,
+    after: Option<IssueCursor>,
+    limit: i64,
+) -> Result<IssuesPage> {
+    let limit = limit.clamp(1, 500);
+    let fetch = limit + 1;
+
+    let mut out: Vec<(Issue, u8, i64)> = Vec::with_capacity(fetch as usize);
+    match after {
+        Some(cursor) => {
+            let mut stmt = conn.prepare_cached(&format!(
+                "SELECT {ISSUE_COLUMNS}, {ISSUE_RANK_SQL} AS rank \
+                 FROM audit_issues ai WHERE ai.audit_run_id = ?1 \
+                   AND ({ISSUE_RANK_SQL} > ?2 OR ({ISSUE_RANK_SQL} = ?2 AND ai.id > ?3)) \
+                 ORDER BY {ISSUE_RANK_SQL}, ai.id LIMIT ?4"
+            ))?;
+            let rows = stmt.query_map(
+                rusqlite::params![run_id, cursor.rank as i64, cursor.id, fetch],
+                |r| {
+                    let id: i64 = r.get(11)?;
+                    let rank: i64 = r.get(12)?;
+                    Ok((row_to_issue(r)?, rank as u8, id))
+                },
+            )?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        None => {
+            let mut stmt = conn.prepare_cached(&format!(
+                "SELECT {ISSUE_COLUMNS}, {ISSUE_RANK_SQL} AS rank \
+                 FROM audit_issues ai WHERE ai.audit_run_id = ?1 \
+                 ORDER BY {ISSUE_RANK_SQL}, ai.id LIMIT ?2"
+            ))?;
+            let rows = stmt.query_map(rusqlite::params![run_id, fetch], |r| {
+                let id: i64 = r.get(11)?;
+                let rank: i64 = r.get(12)?;
+                Ok((row_to_issue(r)?, rank as u8, id))
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+    }
+
+    let has_more = out.len() as i64 > limit;
+    if has_more {
+        out.truncate(limit as usize);
+    }
+    let next_cursor = if has_more {
+        out.last().map(|(_, rank, id)| IssueCursor {
+            rank: *rank,
+            id: *id,
+        })
+    } else {
+        None
+    };
+    Ok(IssuesPage {
+        items: out.into_iter().map(|(issue, _, _)| issue).collect(),
+        next_cursor,
+    })
+}
+
+/// Keyset pagination for history: runs older than `before_id` (exclusive),
+/// newest first (C01). `None` starts from the newest run.
+pub fn list_runs_page(
+    conn: &Connection,
+    before_id: Option<i64>,
+    limit: i64,
+) -> Result<Vec<AuditRunSummary>> {
+    let limit = limit.clamp(1, 500);
+    let sql = match before_id {
+        Some(_) => {
+            "SELECT id, file_path, file_name, started_at, total_findings, errors, warnings, info, \
+                    verdict, policy, qg_passed \
+             FROM audit_runs WHERE id < ?1 ORDER BY id DESC LIMIT ?2"
+        }
+        None => {
+            "SELECT id, file_path, file_name, started_at, total_findings, errors, warnings, info, \
+                    verdict, policy, qg_passed \
+             FROM audit_runs ORDER BY id DESC LIMIT ?1"
+        }
+    };
+    let mut stmt = conn.prepare_cached(sql)?;
+    let map_row = |r: &rusqlite::Row<'_>| {
         Ok(AuditRunSummary {
             id: r.get(0)?,
             file_path: r.get(1)?,
@@ -218,7 +382,33 @@ pub fn list_runs(conn: &Connection, limit: i64) -> Result<Vec<AuditRunSummary>> 
             policy: r.get(9)?,
             qg_passed: r.get::<_, Option<bool>>(10)?.unwrap_or(false),
         })
-    })?;
+    };
+    let mut out = Vec::new();
+    match before_id {
+        Some(before) => {
+            let rows = stmt.query_map(rusqlite::params![before, limit], map_row)?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        None => {
+            let rows = stmt.query_map(rusqlite::params![limit], map_row)?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Contenedores registrados por los hallazgos de una corrida (C04): scope
+/// válido para el visor histórico.
+pub fn containers_for_run(conn: &Connection, run_id: i64) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT DISTINCT object_container FROM audit_issues \
+         WHERE audit_run_id = ?1 AND object_container IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([run_id], |r| r.get::<_, String>(0))?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);
@@ -226,56 +416,16 @@ pub fn list_runs(conn: &Connection, limit: i64) -> Result<Vec<AuditRunSummary>> 
     Ok(out)
 }
 
-/// Issues for a given run, ordered by severity.
-///
-/// GX-011: reconstruye la identidad de objeto cuando existe (suficiente
-/// para reabrir el miembro correcto del XPZ en el visor).
-pub fn get_issues_for_run(conn: &Connection, run_id: i64) -> Result<Vec<Issue>> {
-    let mut stmt = conn.prepare(
-        "SELECT ai.rule_id, ai.line_number, ai.line_content, ai.description, ai.file_path, ai.severity, \
-                ai.object_id, ai.object_type, ai.object_package, ai.object_member, ai.object_container \
-         FROM audit_issues ai WHERE ai.audit_run_id = ?1 \
-         ORDER BY CASE ai.severity WHEN 'ERROR' THEN 0 WHEN 'WARNING' THEN 1 ELSE 2 END, ai.id",
+/// Retention (C01): conserva las `keep` corridas más nuevas y borra el resto
+/// (los issues caen por `ON DELETE CASCADE`). Devuelve las corridas borradas.
+pub fn prune_runs(conn: &Connection, keep: i64) -> Result<usize> {
+    let keep = keep.max(1);
+    let deleted = conn.execute(
+        "DELETE FROM audit_runs WHERE id NOT IN \
+         (SELECT id FROM audit_runs ORDER BY id DESC LIMIT ?1)",
+        rusqlite::params![keep],
     )?;
-    let rows = stmt.query_map([run_id], |r| {
-        let rule_id: String = r.get(0)?;
-        let line_number: i64 = r.get(1)?;
-        let line_content: String = r.get(2)?;
-        let description: String = r.get(3)?;
-        let file_path: String = r.get(4)?;
-        let severity: String = r.get(5)?;
-        let object_id: Option<String> = r.get(6)?;
-        let object_type: Option<String> = r.get(7)?;
-        let object_package: Option<String> = r.get(8)?;
-        let object_member: Option<String> = r.get(9)?;
-        let object_container: Option<String> = r.get(10)?;
-
-        let object = object_id.map(|id| gx_core::models::ObjectRef {
-            id,
-            object_type: object_type.unwrap_or_default(),
-            package: object_package.unwrap_or_default(),
-            member: object_member.unwrap_or_default(),
-            container_path: object_container.unwrap_or_default(),
-        });
-        Ok(Issue {
-            rule_id,
-            line_number: line_number as u32,
-            line_content,
-            description,
-            file_path: std::path::PathBuf::from(file_path),
-            severity: match severity.as_str() {
-                "ERROR" => gx_core::models::Severity::Error,
-                "WARNING" => gx_core::models::Severity::Warning,
-                _ => gx_core::models::Severity::Info,
-            },
-            object,
-        })
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
+    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -338,6 +488,114 @@ mod tests {
         assert_eq!(obj.member, "PkgDemo/ProcMalo.xml");
         assert_eq!(issues[0].line_number, 3);
         assert_eq!(issues[1].line_number, 7);
+    }
+
+    fn issue_with_severity(rule_id: &str, severity: Severity, line: u32) -> Issue {
+        Issue {
+            rule_id: rule_id.to_string(),
+            severity,
+            line_number: line,
+            line_content: format!("linea {line}"),
+            description: format!("desc {rule_id}"),
+            file_path: std::path::PathBuf::from("sample.xpz"),
+            object: None,
+        }
+    }
+
+    /// C01: la paginación keyset recorre TODOS los issues una sola vez, en
+    /// orden severidad→id, sin duplicados ni saltos.
+    #[test]
+    fn issues_keyset_pagination_walks_every_issue_once() {
+        let mut conn = crate::db::init_memory_db().unwrap();
+        let issues: Vec<Issue> = (0..7)
+            .map(|i| match i % 3 {
+                0 => issue_with_severity("GX.1.1", Severity::Warning, i),
+                1 => issue_with_severity("GX.2.6", Severity::Error, i),
+                _ => issue_with_severity("GX.1.2", Severity::Info, i),
+            })
+            .collect();
+        let run_id = persist_run(&mut conn, &golden_run(), &issues).unwrap();
+
+        let mut collected: Vec<(String, u32)> = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = get_issues_page(&conn, run_id, cursor, 2).unwrap();
+            assert!(page.items.len() <= 2);
+            for issue in &page.items {
+                collected.push((issue.rule_id.clone(), issue.line_number));
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(collected.len(), 7, "sin duplicados ni saltos");
+        let severities: Vec<&str> = collected
+            .iter()
+            .map(|(rule, _)| match rule.as_str() {
+                "GX.2.6" => "ERROR",
+                "GX.1.1" => "WARNING",
+                _ => "INFO",
+            })
+            .collect();
+        let mut sorted = severities.clone();
+        sorted.sort_by_key(|s| match *s {
+            "ERROR" => 0,
+            "WARNING" => 1,
+            _ => 2,
+        });
+        assert_eq!(severities, sorted, "orden severidad→id");
+    }
+
+    /// C01: la retención conserva las corridas más nuevas y el CASCADE borra
+    /// los issues de las corridas podadas.
+    #[test]
+    fn prune_runs_keeps_newest_and_cascades_issues() {
+        let mut conn = crate::db::init_memory_db().unwrap();
+        let mut run_ids = Vec::new();
+        for _ in 0..5 {
+            let run_id = persist_run(
+                &mut conn,
+                &golden_run(),
+                &[issue_with_severity("GX.2.6", Severity::Error, 1)],
+            )
+            .unwrap();
+            run_ids.push(run_id);
+        }
+
+        let deleted = prune_runs(&conn, 2).unwrap();
+        assert_eq!(deleted, 3);
+        let remaining = list_runs_page(&conn, None, 10).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].id, run_ids[4], "la más nueva se conserva");
+        assert_eq!(remaining[1].id, run_ids[3]);
+
+        let orphan_issues: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_issues WHERE audit_run_id NOT IN \
+                 (SELECT id FROM audit_runs)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_issues, 0, "CASCADE limpia los issues podados");
+    }
+
+    /// C01: el historial pagina por keyset (before_id) sin repetir corridas.
+    #[test]
+    fn runs_keyset_pagination_is_stable() {
+        let mut conn = crate::db::init_memory_db().unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            ids.push(persist_run(&mut conn, &golden_run(), &[]).unwrap());
+        }
+        let first = list_runs_page(&conn, None, 2).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].id, ids[4]);
+        let second = list_runs_page(&conn, Some(first[1].id), 2).unwrap();
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].id, ids[2]);
+        assert!(second.iter().all(|r| r.id < first[1].id));
     }
 
     /// GX-011: si falla la inserción de issues, la corrida COMPLETA se

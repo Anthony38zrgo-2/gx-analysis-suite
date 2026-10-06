@@ -1,67 +1,71 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 import type { Issue, Severity } from "../api/types";
 
+/** C01/C03: la tabla sólo recibe la página pedida; filtros y conteos se
+ * resuelven en Rust y el frontend nunca materializa el resultado completo. */
 const props = defineProps<{
-  findings: Issue[];
+  items: Issue[];
+  total: number;
+  filteredTotal: number;
+  rules: string[];
+  offset: number;
+  pageSize: number;
+  loading: boolean;
+  filters: { severity: string; ruleId: string; search: string };
   emptyMessage?: string;
 }>();
 
-const emit = defineEmits<{ select: [issue: Issue] }>();
+const emit = defineEmits<{
+  select: [issue: Issue];
+  filters: [filters: { severity: string; ruleId: string; search: string }];
+  page: [offset: number];
+}>();
 
-const PAGE_SIZE = 100;
-
-const severityFilter = ref<"ALL" | Severity>("ALL");
-const ruleFilter = ref("ALL");
-const search = ref("");
-const page = ref(0);
+const localSearch = ref(props.filters.search);
 const activeIndex = ref(-1);
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-const rules = computed(() =>
-  Array.from(new Set(props.findings.map((f) => f.rule_id))).sort(),
+watch(
+  () => props.filters.search,
+  (value) => {
+    if (value !== localSearch.value) localSearch.value = value;
+  },
 );
 
-const filtered = computed(() => {
-  const term = search.value.trim().toLowerCase();
-  return props.findings.filter((issue) => {
-    if (severityFilter.value !== "ALL" && issue.severity !== severityFilter.value) {
-      return false;
-    }
-    if (ruleFilter.value !== "ALL" && issue.rule_id !== ruleFilter.value) {
-      return false;
-    }
-    if (term) {
-      const object = issue.object
-        ? `${issue.object.id} ${issue.object.object_type} ${issue.object.member}`
-        : "";
-      const haystack = `${issue.rule_id} ${issue.description} ${object}`.toLowerCase();
-      if (!haystack.includes(term)) return false;
-    }
-    return true;
-  });
+watch(localSearch, (value) => {
+  if (debounceTimer !== null) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => {
+    debounceTimer = null;
+    emit("filters", { ...props.filters, search: value });
+  }, 200);
+});
+
+onBeforeUnmount(() => {
+  if (debounceTimer !== null) clearTimeout(debounceTimer);
 });
 
 const pageCount = computed(() =>
-  Math.max(1, Math.ceil(filtered.value.length / PAGE_SIZE)),
+  Math.max(1, Math.ceil(props.filteredTotal / props.pageSize)),
+);
+const pageIndex = computed(() => Math.floor(props.offset / props.pageSize));
+const rangeFrom = computed(() =>
+  props.filteredTotal === 0 ? 0 : props.offset + 1,
+);
+const rangeTo = computed(() =>
+  Math.min(props.offset + props.pageSize, props.filteredTotal),
 );
 
-const visible = computed(() =>
-  filtered.value.slice(page.value * PAGE_SIZE, (page.value + 1) * PAGE_SIZE),
+watch(
+  () => props.items,
+  () => {
+    activeIndex.value = -1;
+  },
 );
-
-watch([severityFilter, ruleFilter, search], () => {
-  page.value = 0;
-});
-
-watch([visible, pageCount], () => {
-  if (activeIndex.value >= visible.value.length) {
-    activeIndex.value = visible.value.length - 1;
-  }
-});
 
 function rowId(index: number): string {
-  return `finding-row-${page.value}-${index}`;
+  return `finding-row-${props.offset}-${index}`;
 }
 
 function severityClass(severity: Severity): string {
@@ -70,15 +74,33 @@ function severityClass(severity: Severity): string {
   return "bg-sky-900/60 text-sky-200";
 }
 
+function changeSeverity(event: Event) {
+  const value = (event.target as HTMLSelectElement).value;
+  emit("filters", { ...props.filters, severity: value });
+}
+
+function changeRule(event: Event) {
+  const value = (event.target as HTMLSelectElement).value;
+  emit("filters", { ...props.filters, ruleId: value });
+}
+
+function previousPage() {
+  emit("page", Math.max(0, props.offset - props.pageSize));
+}
+
+function nextPage() {
+  emit("page", props.offset + props.pageSize);
+}
+
 function onKeydown(event: KeyboardEvent) {
   if (event.key === "j" || event.key === "ArrowDown") {
     event.preventDefault();
-    activeIndex.value = Math.min(activeIndex.value + 1, visible.value.length - 1);
+    activeIndex.value = Math.min(activeIndex.value + 1, props.items.length - 1);
   } else if (event.key === "k" || event.key === "ArrowUp") {
     event.preventDefault();
     activeIndex.value = Math.max(activeIndex.value - 1, 0);
   } else if (event.key === "Enter" && activeIndex.value >= 0) {
-    const issue = visible.value[activeIndex.value];
+    const issue = props.items[activeIndex.value];
     if (issue) emit("select", issue);
   }
   void nextTick(() => {
@@ -97,13 +119,18 @@ function onKeydown(event: KeyboardEvent) {
     aria-label="Hallazgos"
   >
     <div class="flex flex-wrap items-center gap-3 border-b border-slate-800 p-4">
-      <h3 class="text-sm font-medium">Hallazgos ({{ filtered.length }})</h3>
+      <h3 class="text-sm font-medium">
+        Hallazgos ({{ filteredTotal }}<template v-if="filteredTotal !== total">
+          de {{ total }}</template
+        >)
+      </h3>
       <div class="ml-auto flex flex-wrap items-center gap-2 text-xs">
         <label class="sr-only" for="findings-severity">Filtrar por severidad</label>
         <select
           id="findings-severity"
-          v-model="severityFilter"
+          :value="filters.severity"
           class="rounded border border-slate-700 bg-slate-950 px-2 py-1"
+          @change="changeSeverity"
         >
           <option value="ALL">Todas las severidades</option>
           <option value="ERROR">ERROR</option>
@@ -114,8 +141,9 @@ function onKeydown(event: KeyboardEvent) {
         <label class="sr-only" for="findings-rule">Filtrar por regla</label>
         <select
           id="findings-rule"
-          v-model="ruleFilter"
+          :value="filters.ruleId"
           class="rounded border border-slate-700 bg-slate-950 px-2 py-1"
+          @change="changeRule"
         >
           <option value="ALL">Todas las reglas</option>
           <option v-for="rule in rules" :key="rule" :value="rule">
@@ -126,7 +154,7 @@ function onKeydown(event: KeyboardEvent) {
         <label class="sr-only" for="findings-search">Buscar hallazgos</label>
         <input
           id="findings-search"
-          v-model="search"
+          v-model="localSearch"
           type="search"
           placeholder="Buscar…"
           class="w-44 rounded border border-slate-700 bg-slate-950 px-2 py-1"
@@ -154,7 +182,7 @@ function onKeydown(event: KeyboardEvent) {
         </thead>
         <tbody>
           <tr
-            v-for="(issue, index) in visible"
+            v-for="(issue, index) in items"
             :id="rowId(index)"
             :key="`${issue.rule_id}-${issue.file_path}-${issue.line_number}-${index}`"
             class="cursor-pointer border-t border-slate-800/60 hover:bg-slate-800/60"
@@ -181,9 +209,9 @@ function onKeydown(event: KeyboardEvent) {
             <td class="px-4 py-2 font-mono">{{ issue.line_number }}</td>
             <td class="px-4 py-2">{{ issue.description }}</td>
           </tr>
-          <tr v-if="visible.length === 0">
+          <tr v-if="items.length === 0">
             <td colspan="5" class="px-4 py-8 text-center text-slate-400">
-              {{ emptyMessage ?? "Sin hallazgos para los filtros actuales." }}
+              {{ loading ? "Cargando hallazgos…" : (emptyMessage ?? "Sin hallazgos para los filtros actuales.") }}
             </td>
           </tr>
         </tbody>
@@ -191,23 +219,26 @@ function onKeydown(event: KeyboardEvent) {
     </div>
 
     <div
-      v-if="pageCount > 1"
+      v-if="pageCount > 1 || filteredTotal > 0"
       class="flex items-center justify-between border-t border-slate-800 p-3 text-xs"
     >
       <button
         type="button"
         class="rounded border border-slate-700 px-3 py-1 disabled:opacity-40"
-        :disabled="page === 0"
-        @click="page -= 1"
+        :disabled="pageIndex === 0 || loading"
+        @click="previousPage"
       >
         Anterior
       </button>
-      <span>Página {{ page + 1 }} de {{ pageCount }}</span>
+      <span>
+        {{ rangeFrom }}–{{ rangeTo }} de {{ filteredTotal }}
+        · página {{ pageIndex + 1 }} de {{ pageCount }}
+      </span>
       <button
         type="button"
         class="rounded border border-slate-700 px-3 py-1 disabled:opacity-40"
-        :disabled="page >= pageCount - 1"
-        @click="page += 1"
+        :disabled="pageIndex >= pageCount - 1 || loading"
+        @click="nextPage"
       >
         Siguiente
       </button>

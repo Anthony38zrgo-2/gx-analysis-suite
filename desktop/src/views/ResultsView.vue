@@ -3,18 +3,33 @@ import { computed } from "vue";
 
 import FailuresPanel from "../components/FailuresPanel.vue";
 import FindingsTable from "../components/FindingsTable.vue";
-import type { AuditMetrics, Issue, QgVerdict, ScanFailure } from "../api/types";
+import type {
+  AuditMetrics,
+  FindingsPage,
+  Issue,
+  QgVerdict,
+  ScanCompletion,
+  ScanFailure,
+} from "../api/types";
 
 const props = defineProps<{
-  findings: Issue[];
   metrics: AuditMetrics;
   verdict: QgVerdict | null;
   policyLabel: string;
   failures: ScanFailure[];
   scannedFiles: number;
+  page: FindingsPage | null;
+  loading: boolean;
+  filters: { severity: string; ruleId: string; search: string };
+  historyError?: string | null;
+  completion?: ScanCompletion | null;
 }>();
 
-const emit = defineEmits<{ select: [issue: Issue] }>();
+const emit = defineEmits<{
+  select: [issue: Issue];
+  filters: [filters: { severity: string; ruleId: string; search: string }];
+  page: [offset: number];
+}>();
 
 const banner = computed(() => {
   switch (props.verdict) {
@@ -41,6 +56,13 @@ const banner = computed(() => {
   }
 });
 
+const completionLabel = computed(() => {
+  if (props.completion === "partial") return "Resultado PARCIAL: se alcanzó un límite de recursos.";
+  if (props.completion === "cancelled") return "Escaneo CANCELADO: cobertura incompleta.";
+  if (props.completion === "failed") return "Escaneo FALLIDO: revise los fallos.";
+  return null;
+});
+
 const cards = computed(() => [
   { label: "Hallazgos", value: props.metrics.total_findings },
   { label: "Errores", value: props.metrics.errors },
@@ -65,6 +87,23 @@ const cards = computed(() => [
       </span>
     </div>
 
+    <p
+      v-if="completionLabel"
+      class="rounded border border-amber-700 bg-amber-950/30 px-4 py-2 text-xs text-amber-200"
+      role="status"
+    >
+      {{ completionLabel }}
+    </p>
+
+    <p
+      v-if="historyError"
+      class="rounded border border-amber-700 bg-amber-950/30 px-4 py-2 text-xs text-amber-200"
+      role="status"
+    >
+      Los hallazgos se calcularon correctamente, pero no se pudo guardar el
+      historial: {{ historyError }}
+    </p>
+
     <div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
       <div
         v-for="card in cards"
@@ -79,9 +118,18 @@ const cards = computed(() => [
     <FailuresPanel :failures="failures" />
 
     <FindingsTable
-      :findings="findings"
+      :items="page?.items ?? []"
+      :total="page?.total ?? 0"
+      :filtered-total="page?.filtered_total ?? 0"
+      :rules="page?.rules ?? []"
+      :offset="page?.offset ?? 0"
+      :page-size="page?.limit ?? 100"
+      :loading="loading"
+      :filters="filters"
       empty-message="Sin hallazgos: el resultado está limpio."
       @select="emit('select', $event)"
+      @filters="emit('filters', $event)"
+      @page="emit('page', $event)"
     />
   </div>
 </template>

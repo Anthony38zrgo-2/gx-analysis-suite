@@ -21,9 +21,9 @@ const viewerIndex = ref<number | null>(null);
 const exporting = ref(false);
 const exportMessage = ref<string | null>(null);
 
-const findings = computed(() => scan.result?.findings ?? []);
+const pageItems = computed(() => scan.page?.items ?? []);
 const selectedIssue = computed(() =>
-  viewerIndex.value === null ? null : (findings.value[viewerIndex.value] ?? null),
+  viewerIndex.value === null ? null : (pageItems.value[viewerIndex.value] ?? null),
 );
 
 const policyLabel = computed(() => formatPolicy(scan.policy));
@@ -76,16 +76,17 @@ async function start() {
 }
 
 function openViewer(issue: Issue) {
-  const index = findings.value.indexOf(issue);
+  const index = pageItems.value.indexOf(issue);
   viewerIndex.value = index >= 0 ? index : null;
 }
 
 async function exportPdf() {
-  if (!scan.result) return;
+  const sessionId = scan.summary?.session_id;
+  if (sessionId === undefined) return;
   exportMessage.value = null;
   exporting.value = true;
   try {
-    const path = await savePdf(scan.result);
+    const path = await savePdf(sessionId);
     exportMessage.value = path ? `PDF guardado en ${path}` : "Exportación cancelada.";
   } catch (e) {
     exportMessage.value = toCommandError(e).message;
@@ -97,7 +98,7 @@ async function exportPdf() {
 function moveViewer(delta: number) {
   if (viewerIndex.value === null) return;
   const next = viewerIndex.value + delta;
-  if (next >= 0 && next < findings.value.length) viewerIndex.value = next;
+  if (next >= 0 && next < pageItems.value.length) viewerIndex.value = next;
 }
 </script>
 
@@ -250,17 +251,27 @@ function moveViewer(delta: number) {
       v-if="scan.running || scan.progressEntries.length > 0"
       :entries="scan.progressEntries"
       :running="scan.running"
+      :total="scan.total"
+      :finished="scan.finished"
+      :failures="scan.progressFailures"
+      :truncated="scan.progressTruncated"
     />
 
     <ResultsView
-      v-if="scan.result"
-      :findings="scan.result.findings"
-      :metrics="scan.result.metrics"
-      :verdict="scan.result.verdict"
+      v-if="scan.summary"
+      :metrics="scan.summary.metrics"
+      :verdict="scan.summary.verdict"
       :policy-label="policyLabel"
-      :failures="scan.result.failures"
-      :scanned-files="scan.result.scanned_files"
+      :failures="scan.summary.failures"
+      :scanned-files="scan.summary.scanned_files"
+      :page="scan.page"
+      :loading="scan.pageLoading"
+      :filters="scan.filters"
+      :history-error="scan.summary.history_error"
+      :completion="scan.summary.completion"
       @select="openViewer"
+      @filters="scan.setFilters"
+      @page="scan.goToPage"
     >
       <template #actions>
         <button
@@ -294,8 +305,9 @@ function moveViewer(delta: number) {
     <SourceViewer
       v-if="selectedIssue"
       :finding="selectedIssue"
+      :session-id="scan.summary?.session_id"
       :has-prev="(viewerIndex ?? 0) > 0"
-      :has-next="(viewerIndex ?? 0) < findings.length - 1"
+      :has-next="(viewerIndex ?? 0) < pageItems.length - 1"
       @close="viewerIndex = null"
       @prev="moveViewer(-1)"
       @next="moveViewer(1)"

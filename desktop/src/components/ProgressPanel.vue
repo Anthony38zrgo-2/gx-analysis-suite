@@ -6,18 +6,15 @@ import type { ScanProgressEvent } from "../api/types";
 const props = defineProps<{
   entries: ScanProgressEvent[];
   running: boolean;
+  /** C03: contadores incrementales (no dependen de la lista acotada). */
+  total: number;
+  finished: number;
+  failures: number;
+  truncated: boolean;
 }>();
 
-const finished = computed(
-  () => props.entries.filter((e) => e.status !== "pending").length,
-);
-const failures = computed(
-  () => props.entries.filter((e) => e.status === "error").length,
-);
 const pct = computed(() =>
-  props.entries.length === 0
-    ? 0
-    : Math.round((finished.value / props.entries.length) * 100),
+  props.total === 0 ? 0 : Math.round((props.finished / props.total) * 100),
 );
 
 function baseName(path: string): string {
@@ -47,7 +44,7 @@ function statusLabel(event: ScanProgressEvent): string {
       <h3 class="text-sm font-medium">
         Progreso
         <span class="text-slate-400">
-          ({{ finished }}/{{ entries.length }} archivos{{ failures ? `, ${failures} con fallo` : "" }})
+          ({{ finished }}/{{ total }} archivos{{ failures ? `, ${failures} con fallo` : "" }})
         </span>
       </h3>
       <span class="text-xs text-slate-400">{{ pct }}%</span>
@@ -90,6 +87,9 @@ function statusLabel(event: ScanProgressEvent): string {
       </li>
       <li v-if="entries.length === 0 && running" class="text-slate-400">
         Descubriendo archivos…
+      </li>
+      <li v-if="truncated" class="text-slate-500">
+        … mostrando los primeros {{ entries.length }} de {{ total }} archivos.
       </li>
     </ul>
   </section>

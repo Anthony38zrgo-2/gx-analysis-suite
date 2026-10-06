@@ -5,17 +5,23 @@
 //! duplica lógica de lint. Toda entrada se valida en la frontera Rust y los
 //! errores se devuelven estructurados (`CommandError`), nunca como panic.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::State;
 
-use gx_core::models::{AnalysisRequest, AnalysisResult, Issue};
-use gx_sources::filesystem::is_source_extension;
+use gx_core::budget::ExecutionBudget;
+use gx_core::models::{
+    AnalysisRequest, AnalysisResult, AuditMetrics, Issue, QgPolicy, QgVerdict, ScanCompletion,
+    ScanCoverage, ScanFailure, SourceObject,
+};
 use gx_engine::runtime::{self, FileProgress, FileProgressState};
+use gx_sources::filesystem::is_source_extension;
 use gx_storage::dao::{audit_dao, rules_dao, settings_dao};
 
 /// Scan activo con su identidad y token de cancelación propios (A04/F08).
@@ -24,14 +30,87 @@ struct ActiveScan {
     token: Arc<AtomicBool>,
 }
 
-/// Estado compartido: scan activo (token por invocación) y base local.
-///
-/// A04: cada invocación tiene su propio `ScanId`/token; un segundo scan NO
-/// puede limpiar ni cancelar el token de otro. Sólo hay un scan activo.
+/// Sesión de resultados acotada (C01): los findings grandes viven en Rust y
+/// el frontend pide páginas; la retención evita crecer sin límite.
+pub struct ScanSession {
+    pub request: AnalysisRequest,
+    pub result: AnalysisResult,
+    pub history_error: Option<String>,
+}
+
+/// Store de sesiones con retención por cantidad y por findings (C01).
+pub struct SessionStore {
+    next_id: u64,
+    sessions: VecDeque<(u64, ScanSession)>,
+    max_sessions: usize,
+    max_findings: usize,
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self {
+            next_id: 1,
+            sessions: VecDeque::new(),
+            max_sessions: 8,
+            max_findings: 50_000,
+        }
+    }
+}
+
+impl SessionStore {
+    pub fn insert(
+        &mut self,
+        request: AnalysisRequest,
+        result: AnalysisResult,
+        history_error: Option<String>,
+    ) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.sessions.push_back((
+            id,
+            ScanSession {
+                request,
+                result,
+                history_error,
+            },
+        ));
+        self.enforce_retention();
+        id
+    }
+
+    fn total_findings(&self) -> usize {
+        self.sessions
+            .iter()
+            .map(|(_, session)| session.result.findings.len())
+            .sum()
+    }
+
+    fn enforce_retention(&mut self) {
+        while self.sessions.len() > self.max_sessions
+            || (self.total_findings() > self.max_findings && self.sessions.len() > 1)
+        {
+            self.sessions.pop_front();
+        }
+    }
+
+    pub fn get(&self, id: u64) -> Option<&ScanSession> {
+        self.sessions
+            .iter()
+            .find(|(session_id, _)| *session_id == id)
+            .map(|(_, session)| session)
+    }
+}
+
+/// Estado compartido: scan activo (token por invocación), base local con pool
+/// (migrada UNA vez por arranque, C01), sesiones de resultados y caché de
+/// fuentes (C02).
 pub struct DesktopState {
     active: Arc<Mutex<Option<ActiveScan>>>,
     next_id: Arc<AtomicU64>,
     db_path: Option<PathBuf>,
+    pool: Arc<Mutex<Option<gx_storage::db::SqlitePool>>>,
+    sessions: Arc<Mutex<SessionStore>>,
+    source_cache: Arc<Mutex<SourceCache>>,
 }
 
 impl Default for DesktopState {
@@ -40,22 +119,204 @@ impl Default for DesktopState {
             active: Arc::new(Mutex::new(None)),
             next_id: Arc::new(AtomicU64::new(0)),
             db_path: None,
+            pool: Arc::new(Mutex::new(None)),
+            sessions: Arc::new(Mutex::new(SessionStore::default())),
+            source_cache: Arc::new(Mutex::new(SourceCache::default())),
         }
     }
+}
+
+/// Estampilla del contenedor para detectar fuentes modificadas (C02).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContainerStamp {
+    len: u64,
+    modified_nanos: u64,
+}
+
+fn container_stamp(path: &Path) -> ContainerStamp {
+    match std::fs::metadata(path) {
+        Ok(metadata) => ContainerStamp {
+            len: metadata.len(),
+            modified_nanos: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
+        },
+        Err(_) => ContainerStamp {
+            len: 0,
+            modified_nanos: 0,
+        },
+    }
+}
+
+struct CachedObject {
+    source: SourceObject,
+    stamp: ContainerStamp,
+    tick: u64,
+}
+
+/// Caché acotada de objetos extraídos, keyed por contenedor+miembro+id y
+/// estampilla de archivo (C02): navegar dentro de un objeto no vuelve a
+/// descomprimir el paquete.
+pub struct SourceCache {
+    entries: HashMap<(String, String, String), CachedObject>,
+    tick: u64,
+    max_entries: usize,
+}
+
+impl Default for SourceCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            tick: 0,
+            max_entries: 8,
+        }
+    }
+}
+
+impl SourceCache {
+    /// Devuelve (objeto, `source_modified`, `cached`).
+    fn get_or_load(
+        &mut self,
+        path: &Path,
+        member: &str,
+        id: &str,
+    ) -> Result<(SourceObject, bool, bool), CommandError> {
+        let key = (
+            path.canonicalize()
+                .unwrap_or_else(|_| path.to_path_buf())
+                .to_string_lossy()
+                .to_string(),
+            member.to_string(),
+            id.to_string(),
+        );
+        let stamp = container_stamp(path);
+        let mut modified = false;
+        if let Some(entry) = self.entries.get_mut(&key) {
+            if entry.stamp == stamp {
+                self.tick += 1;
+                entry.tick = self.tick;
+                return Ok((entry.source.clone(), false, true));
+            }
+            // El contenedor cambió desde la última lectura (C02).
+            modified = true;
+        }
+        let source = find_object_strict(path, member, id)?;
+        self.tick += 1;
+        self.entries.insert(
+            key,
+            CachedObject {
+                source: source.clone(),
+                stamp,
+                tick: self.tick,
+            },
+        );
+        while self.entries.len() > self.max_entries {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.tick)
+                .map(|(key, _)| key.clone())
+            {
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        Ok((source, modified, false))
+    }
+}
+
+/// Busca EXACTAMENTE (member, id) con corte temprano (C02): no extrae los
+/// miembros posteriores y NUNCA cae al primer candidato.
+fn find_object_strict(path: &Path, member: &str, id: &str) -> Result<SourceObject, CommandError> {
+    let budget = ExecutionBudget::default();
+    let mut stream = gx_sources::xpz_extractor::source_object_stream(path, &budget, None)
+        .map_err(|e| CommandError::new("scan", format!("no se pudo abrir el objeto: {e}")))?;
+    let mut fallback: Option<SourceObject> = None;
+    for item in stream.by_ref() {
+        let object = item
+            .map_err(|e| CommandError::new("scan", format!("no se pudo abrir el objeto: {e}")))?;
+        if object.object.member != member {
+            continue;
+        }
+        if object.object.id == id {
+            return Ok(object);
+        }
+        if fallback.is_none() {
+            fallback = Some(object);
+        }
+    }
+    match fallback {
+        // `id` vacío (p. ej. .txt con un solo objeto): se acepta el único
+        // candidato del miembro, pero nunca "el primero de varios".
+        Some(object) if id.is_empty() => Ok(object),
+        _ => Err(CommandError::new(
+            "not_found",
+            format!(
+                "No existe el objeto '{id}' en el miembro '{member}' de '{}'.",
+                path.display()
+            ),
+        )),
+    }
+}
+
+/// El contenedor debe pertenecer a un input aprobado de la sesión (C04:
+/// el visor no es acceso irrestricto al filesystem).
+fn is_approved_container(session: &ScanSession, container: &Path) -> bool {
+    let canonical = container
+        .canonicalize()
+        .unwrap_or_else(|_| container.to_path_buf());
+    session.request.inputs.iter().any(|input| {
+        let approved = input.canonicalize().unwrap_or_else(|_| input.to_path_buf());
+        canonical == approved || canonical.starts_with(&approved)
+    })
 }
 
 impl DesktopState {
     /// Estado con una base local alternativa (tests / usos avanzados).
     pub fn with_db_path(db_path: PathBuf) -> Self {
         Self {
-            active: Arc::new(Mutex::new(None)),
-            next_id: Arc::new(AtomicU64::new(0)),
             db_path: Some(db_path),
+            ..Default::default()
         }
     }
 
-    fn conn(&self) -> Result<rusqlite::Connection, CommandError> {
-        open_db(self.db_path.as_deref())
+    /// Conexión del pool local; migra y siembra UNA vez por arranque (C01).
+    fn conn(&self) -> Result<gx_storage::db::PooledSqliteConnection, CommandError> {
+        let mut guard = self
+            .pool
+            .lock()
+            .map_err(|_| CommandError::new("internal", "pool de base envenenado"))?;
+        if guard.is_none() {
+            let path = match &self.db_path {
+                Some(path) => path.clone(),
+                None => gx_storage::db::get_db_path(),
+            };
+            let pool = gx_storage::db::get_pool_at(&path)
+                .map_err(|e| CommandError::new("database", format!("base de datos: {e}")))?;
+            *guard = Some(pool);
+        }
+        guard
+            .as_ref()
+            .expect("pool inicializado")
+            .get()
+            .map_err(|e| CommandError::new("database", format!("conexión de base: {e}")))
+    }
+
+    /// Guarda la corrida en una sesión acotada y devuelve su id (C01).
+    pub fn store_session(
+        &self,
+        request: AnalysisRequest,
+        result: AnalysisResult,
+        history_error: Option<String>,
+    ) -> u64 {
+        match self.sessions.lock() {
+            Ok(mut store) => store.insert(request, result, history_error),
+            Err(_) => 0,
+        }
     }
 
     /// Registra un scan nuevo; rechaza si ya hay uno en curso (A04).
@@ -98,14 +359,6 @@ impl DesktopState {
         }
         false
     }
-}
-
-fn open_db(db_path: Option<&Path>) -> Result<rusqlite::Connection, CommandError> {
-    let result = match db_path {
-        Some(path) => gx_storage::db::init_db_at(path),
-        None => gx_storage::db::init_db(),
-    };
-    result.map_err(|e| CommandError::new("database", format!("base de datos: {e}")))
 }
 
 /// Error estructurado Rust → frontend (nunca panic/500).
@@ -181,13 +434,69 @@ pub fn validate_request(request: &AnalysisRequest) -> Result<(), CommandError> {
     Ok(())
 }
 
-/// Escaneo asíncrono con progreso por archivo y cancelación (GX-016).
+/// Resumen de un scan: el frontend NO recibe todos los findings, sólo la
+/// cabecera y el total; las páginas se piden por `session_id` (C01).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanSummaryDto {
+    pub session_id: u64,
+    pub schema_version: u32,
+    pub request: AnalysisRequest,
+    pub scanned_files: usize,
+    pub metrics: AuditMetrics,
+    pub failures: Vec<ScanFailure>,
+    pub policy: QgPolicy,
+    pub verdict: QgVerdict,
+    pub coverage: ScanCoverage,
+    pub completion: ScanCompletion,
+    pub findings_total: usize,
+    /// Fallo de persistencia: el resultado del scan NO se descarta (C01).
+    pub history_error: Option<String>,
+}
+
+impl ScanSummaryDto {
+    fn from_result(
+        session_id: u64,
+        result: &AnalysisResult,
+        history_error: Option<String>,
+    ) -> Self {
+        Self {
+            session_id,
+            schema_version: result.schema_version,
+            request: result.request.clone(),
+            scanned_files: result.scanned_files,
+            metrics: result.metrics.clone(),
+            failures: result.failures.clone(),
+            policy: result.policy.clone(),
+            verdict: result.verdict,
+            coverage: result.coverage.clone(),
+            completion: result.completion,
+            findings_total: result.findings.len(),
+            history_error,
+        }
+    }
+}
+
+/// Página de findings de una sesión (C01): el desktop nunca materializa el
+/// resultado completo en una respuesta IPC.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FindingsPageDto {
+    pub session_id: u64,
+    pub offset: usize,
+    pub limit: usize,
+    pub filtered_total: usize,
+    pub total: usize,
+    pub items: Vec<Issue>,
+    /// Reglas presentes en la sesión (para el filtro, sin mandar findings).
+    pub rules: Vec<String>,
+}
+
+/// Escaneo asíncrono con progreso por archivo y cancelación (GX-016/C01).
 #[tauri::command]
 pub async fn scan(
     request: AnalysisRequest,
     on_progress: Channel<ScanProgressEvent>,
     state: State<'_, DesktopState>,
-) -> Result<AnalysisResult, CommandError> {
+) -> Result<ScanSummaryDto, CommandError> {
     run_scan(request, on_progress, state.inner()).await
 }
 
@@ -196,39 +505,206 @@ pub async fn run_scan(
     request: AnalysisRequest,
     on_progress: Channel<ScanProgressEvent>,
     state: &DesktopState,
-) -> Result<AnalysisResult, CommandError> {
+) -> Result<ScanSummaryDto, CommandError> {
     validate_request(&request)?;
     // A04/F08: token propio por invocación; un segundo scan se rechaza.
     let (scan_id, cancel) = state.begin_scan()?;
     let db_path = state.db_path.clone();
+    let worker_request = request.clone();
 
     let join = tauri::async_runtime::spawn_blocking(move || {
         let emit = |progress: FileProgress| {
             // Un frontend cerrado no debe romper el escaneo.
             let _ = on_progress.send(ScanProgressEvent::from(progress));
         };
-        let result = runtime::analyze_with_progress(&request, Some(&emit), Some(&cancel));
-        if request.record_history {
-            persist_history(db_path.as_deref(), &request, &result)?;
-        }
-        Ok::<AnalysisResult, CommandError>(result)
+        let result = runtime::analyze_with_progress(&worker_request, Some(&emit), Some(&cancel));
+        // C01: la persistencia es ancilar; su fallo se reporta como warning y
+        // NUNCA descarta los diagnostics ya calculados.
+        let history_error = if worker_request.record_history {
+            persist_history_at(db_path.as_deref(), &worker_request, &result)
+                .err()
+                .map(|error| error.message)
+        } else {
+            None
+        };
+        Ok::<(AnalysisResult, Option<String>), CommandError>((result, history_error))
     })
     .await;
 
     state.finish_scan(scan_id);
-    join.map_err(|e| CommandError::new("internal", format!("la tarea de escaneo falló: {e}")))?
+    let (result, history_error) = join
+        .map_err(|e| CommandError::new("internal", format!("la tarea de escaneo falló: {e}")))??;
+    let session_id = state.store_session(request, result.clone(), history_error.clone());
+    Ok(ScanSummaryDto::from_result(
+        session_id,
+        &result,
+        history_error,
+    ))
 }
 
-fn persist_history(
+/// Retención del historial (C01): se conservan las corridas más recientes.
+pub const HISTORY_RETENTION_RUNS: i64 = 100;
+
+/// Persiste el historial en la base local; omite corridas canceladas (C01) y
+/// aplica retención.
+pub fn persist_history_for(
+    state: &DesktopState,
+    request: &AnalysisRequest,
+    result: &AnalysisResult,
+) -> Result<(), CommandError> {
+    if result.completion == ScanCompletion::Cancelled {
+        return Ok(());
+    }
+    let mut conn = state.conn()?;
+    let run = audit_dao::AuditRun::from_analysis(request, result, "desktop");
+    audit_dao::persist_run(&mut conn, &run, &result.findings)
+        .map_err(|e| map_storage("no se pudo guardar el historial", e))?;
+    let _ = audit_dao::prune_runs(&conn, HISTORY_RETENTION_RUNS)
+        .map_err(|e| map_storage("retención de historial", e))?;
+    Ok(())
+}
+
+/// Variante usada desde el scan (no tiene `&DesktopState` en el worker):
+/// abre una conexión efímera al path configurado.
+fn persist_history_at(
     db_path: Option<&Path>,
     request: &AnalysisRequest,
     result: &AnalysisResult,
 ) -> Result<(), CommandError> {
-    let mut conn = open_db(db_path)?;
+    if result.completion == ScanCompletion::Cancelled {
+        return Ok(());
+    }
+    let mut conn = match db_path {
+        Some(path) => gx_storage::db::init_db_at(path),
+        None => gx_storage::db::init_db(),
+    }
+    .map_err(|e| CommandError::new("database", format!("base de datos: {e}")))?;
     let run = audit_dao::AuditRun::from_analysis(request, result, "desktop");
     audit_dao::persist_run(&mut conn, &run, &result.findings)
         .map_err(|e| map_storage("no se pudo guardar el historial", e))?;
+    let _ = audit_dao::prune_runs(&conn, HISTORY_RETENTION_RUNS)
+        .map_err(|e| map_storage("retención de historial", e))?;
     Ok(())
+}
+
+fn filter_findings<'a>(
+    findings: &'a [Issue],
+    severity: Option<&str>,
+    rule_id: Option<&str>,
+    search: Option<&str>,
+) -> Vec<&'a Issue> {
+    let search = search.map(|s| s.trim().to_lowercase());
+    findings
+        .iter()
+        .filter(|issue| {
+            if let Some(severity) = severity {
+                if !severity.is_empty() && issue.severity.as_str() != severity {
+                    return false;
+                }
+            }
+            if let Some(rule_id) = rule_id {
+                if !rule_id.is_empty() && issue.rule_id != rule_id {
+                    return false;
+                }
+            }
+            if let Some(term) = &search {
+                if !term.is_empty() {
+                    let object = issue
+                        .object
+                        .as_ref()
+                        .map(|o| format!("{} {} {}", o.id, o.object_type, o.member))
+                        .unwrap_or_default();
+                    let haystack = format!("{} {} {}", issue.rule_id, issue.description, object)
+                        .to_lowercase();
+                    if !haystack.contains(term.as_str()) {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+        .collect()
+}
+
+/// Página de findings de una sesión con filtros server-side (C01/C03).
+///
+/// Versión testeable sin `State` de Tauri.
+#[allow(clippy::too_many_arguments)]
+pub fn findings_page(
+    state: &DesktopState,
+    session_id: u64,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    severity: Option<String>,
+    rule_id: Option<String>,
+    search: Option<String>,
+) -> Result<FindingsPageDto, CommandError> {
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| CommandError::new("internal", "sesiones envenenadas"))?;
+    let session = sessions.get(session_id).ok_or_else(|| {
+        CommandError::new(
+            "not_found",
+            format!("La sesión de resultados {session_id} no existe o expiró."),
+        )
+    })?;
+
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(100).clamp(1, 500);
+    let filtered = filter_findings(
+        &session.result.findings,
+        severity.as_deref(),
+        rule_id.as_deref(),
+        search.as_deref(),
+    );
+    let mut rules: Vec<String> = session
+        .result
+        .findings
+        .iter()
+        .map(|issue| issue.rule_id.clone())
+        .collect();
+    rules.sort();
+    rules.dedup();
+
+    let items: Vec<Issue> = filtered
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|issue| (*issue).clone())
+        .collect();
+
+    Ok(FindingsPageDto {
+        session_id,
+        offset,
+        limit,
+        filtered_total: filtered.len(),
+        total: session.result.findings.len(),
+        items,
+        rules,
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn get_findings_page(
+    session_id: u64,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    severity: Option<String>,
+    rule_id: Option<String>,
+    search: Option<String>,
+    state: State<'_, DesktopState>,
+) -> Result<FindingsPageDto, CommandError> {
+    findings_page(
+        state.inner(),
+        session_id,
+        offset,
+        limit,
+        severity,
+        rule_id,
+        search,
+    )
 }
 
 /// Solicita la cancelación del scan en curso (idempotente).
@@ -280,17 +756,19 @@ pub fn list_rules(
     rules_csv: Option<String>,
     state: State<'_, DesktopState>,
 ) -> Result<Vec<rules_dao::RuleRecord>, CommandError> {
-    let conn = match rules_csv.as_deref() {
+    let mut records = match rules_csv.as_deref() {
         Some(csv) => {
             let conn = gx_storage::db::init_memory_db()
                 .map_err(|e| map_storage("catálogo en memoria", e))?;
             gx_storage::seed::import_reglas_csv(&conn, Path::new(csv))
                 .map_err(|e| map_storage("importando Reglas.csv", e))?;
-            conn
+            rules_dao::get_all(&conn).map_err(|e| map_storage("leyendo catálogo", e))?
         }
-        None => state.conn()?,
+        None => {
+            let conn = state.conn()?;
+            rules_dao::get_all(&conn).map_err(|e| map_storage("leyendo catálogo", e))?
+        }
     };
-    let mut records = rules_dao::get_all(&conn).map_err(|e| map_storage("leyendo catálogo", e))?;
     records.retain(|r| !r.is_abstract);
     Ok(records)
 }
@@ -349,42 +827,127 @@ pub fn set_settings(
         .map_err(|e| map_storage("guardando settings", e))
 }
 
-/// Corridas de auditoría más recientes (nuevas primero).
+/// Corridas de auditoría más recientes (keyset: `before_id` exclusivo) (C01).
 #[tauri::command]
 pub fn list_audit_runs(
+    before_id: Option<i64>,
     limit: Option<i64>,
     state: State<'_, DesktopState>,
 ) -> Result<Vec<audit_dao::AuditRunSummary>, CommandError> {
     let conn = state.conn()?;
-    let limit = limit.unwrap_or(50).clamp(1, 1000);
-    audit_dao::list_runs(&conn, limit).map_err(|e| map_storage("leyendo historial", e))
+    let limit = limit.unwrap_or(50).clamp(1, 500);
+    audit_dao::list_runs_page(&conn, before_id, limit)
+        .map_err(|e| map_storage("leyendo historial", e))
 }
 
-/// Hallazgos históricos de una corrida (con identidad de objeto).
-#[tauri::command]
-pub fn get_audit_issues(
+/// Página de hallazgos históricos con cursor keyset opaco (C01).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryIssuesPageDto {
+    pub run_id: i64,
+    pub items: Vec<Issue>,
+    pub next_cursor: Option<String>,
+}
+
+fn encode_cursor(cursor: Option<audit_dao::IssueCursor>) -> Option<String> {
+    cursor.map(|c| format!("{}:{}", c.rank, c.id))
+}
+
+fn decode_cursor(cursor: Option<String>) -> Result<Option<audit_dao::IssueCursor>, CommandError> {
+    match cursor {
+        None => Ok(None),
+        Some(raw) => {
+            let (rank, id) = raw.split_once(':').ok_or_else(|| {
+                CommandError::new("invalid_input", format!("cursor inválido: '{raw}'"))
+            })?;
+            Ok(Some(audit_dao::IssueCursor {
+                rank: rank
+                    .parse()
+                    .map_err(|_| CommandError::new("invalid_input", "rank de cursor inválido"))?,
+                id: id
+                    .parse()
+                    .map_err(|_| CommandError::new("invalid_input", "id de cursor inválido"))?,
+            }))
+        }
+    }
+}
+
+/// Versión testeable sin `State` de Tauri (C01).
+pub fn history_issues_page(
+    state: &DesktopState,
     run_id: i64,
-    state: State<'_, DesktopState>,
-) -> Result<Vec<Issue>, CommandError> {
+    cursor: Option<String>,
+    limit: Option<i64>,
+) -> Result<HistoryIssuesPageDto, CommandError> {
     let conn = state.conn()?;
-    audit_dao::get_issues_for_run(&conn, run_id)
-        .map_err(|e| map_storage("leyendo hallazgos históricos", e))
+    let page =
+        audit_dao::get_issues_page(&conn, run_id, decode_cursor(cursor)?, limit.unwrap_or(100))
+            .map_err(|e| map_storage("leyendo hallazgos históricos", e))?;
+    Ok(HistoryIssuesPageDto {
+        run_id,
+        items: page.items,
+        next_cursor: encode_cursor(page.next_cursor),
+    })
 }
 
-/// Resumen textual idéntico al de `gx scan --format text` (GX-016).
 #[tauri::command]
-pub fn render_text_summary(result: AnalysisResult) -> String {
-    gx_core::summary::text_summary(&result)
+pub fn get_audit_issues_page(
+    run_id: i64,
+    cursor: Option<String>,
+    limit: Option<i64>,
+    state: State<'_, DesktopState>,
+) -> Result<HistoryIssuesPageDto, CommandError> {
+    history_issues_page(state.inner(), run_id, cursor, limit)
 }
 
-/// GX-019: exporta el resultado a PDF con diálogo nativo (sin re-ejecutar el
-/// engine). Devuelve la ruta elegida; cancelar devuelve cadena vacía.
+/// Resumen textual idéntico al de `gx scan --format text` (GX-016/C01: se
+/// renderiza desde la sesión, sin reenviar el resultado desde Vue).
+pub fn text_summary_for(state: &DesktopState, session_id: u64) -> Result<String, CommandError> {
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| CommandError::new("internal", "sesiones envenenadas"))?;
+    let session = sessions.get(session_id).ok_or_else(|| {
+        CommandError::new(
+            "not_found",
+            format!("La sesión de resultados {session_id} no existe o expiró."),
+        )
+    })?;
+    Ok(gx_core::summary::text_summary(&session.result))
+}
+
+#[tauri::command]
+pub fn render_text_summary(
+    session_id: u64,
+    state: State<'_, DesktopState>,
+) -> Result<String, CommandError> {
+    text_summary_for(state.inner(), session_id)
+}
+
+/// GX-019/C01: exporta a PDF la sesión indicada (sin re-ejecutar el engine ni
+/// reenviar el resultado). Devuelve la ruta elegida; cancelar devuelve "".
 #[tauri::command]
 pub async fn save_pdf(
-    result: AnalysisResult,
+    session_id: u64,
     app: tauri::AppHandle,
+    state: State<'_, DesktopState>,
 ) -> Result<String, CommandError> {
     use tauri_plugin_dialog::DialogExt;
+
+    let result = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| CommandError::new("internal", "sesiones envenenadas"))?;
+        sessions
+            .get(session_id)
+            .map(|session| session.result.clone())
+            .ok_or_else(|| {
+                CommandError::new(
+                    "not_found",
+                    format!("La sesión de resultados {session_id} no existe o expiró."),
+                )
+            })?
+    };
 
     let picked = app
         .dialog()
@@ -434,6 +997,29 @@ pub struct ObjectSourceDto {
     pub segments: Vec<ObjectSegmentDto>,
 }
 
+fn source_to_dto(object: &SourceObject) -> ObjectSourceDto {
+    ObjectSourceDto {
+        id: object.object.id.clone(),
+        object_type: object.object.object_type.clone(),
+        package: object.object.package.clone(),
+        member: object.object.member.clone(),
+        container_path: object.object.container_path.clone(),
+        text: object.text.clone(),
+        code_start_line: object.code_start_line,
+        segments: object
+            .segments
+            .iter()
+            .map(|s| ObjectSegmentDto {
+                kind: s.kind.clone(),
+                text_start_line: s.text_start_line,
+                member_start_line: s.member_start_line,
+            })
+            .collect(),
+    }
+}
+
+/// Lectura completa de un objeto (compatibilidad); estricta con (member, id)
+/// y con corte temprano (C02).
 #[tauri::command]
 pub fn read_object_source(
     container_path: String,
@@ -447,34 +1033,86 @@ pub fn read_object_source(
             format!("El artefacto '{}' no existe.", path.display()),
         ));
     }
-    let objects = gx_sources::xpz_extractor::extract_source_objects(&path)
-        .map_err(|e| CommandError::new("scan", format!("no se pudo abrir el objeto: {e}")))?;
-    let candidates: Vec<_> = objects
-        .into_iter()
-        .filter(|o| o.object.member == member)
-        .collect();
-    let found = match id.as_deref() {
-        Some(want) => candidates
-            .iter()
-            .find(|o| o.object.id == want)
-            .or_else(|| candidates.first()),
-        None => candidates.first(),
+    let object = find_object_strict(&path, &member, id.as_deref().unwrap_or(""))?;
+    Ok(source_to_dto(&object))
+}
+
+/// Línea de una ventana del visor con su línea física en el miembro (C02).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceWindowLine {
+    pub text: String,
+    pub text_line: u32,
+    pub member_line: u32,
+}
+
+/// Ventana acotada de un objeto del visor (C02): el frontend pide sólo las
+/// líneas visibles, con coordenadas físicas del miembro.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectWindowDto {
+    pub session_id: u64,
+    pub id: String,
+    pub object_type: String,
+    pub package: String,
+    pub member: String,
+    pub container_path: String,
+    pub code_start_line: u32,
+    pub segments: Vec<ObjectSegmentDto>,
+    pub total_lines: usize,
+    pub window_start: usize,
+    pub window_end: usize,
+    pub lines: Vec<SourceWindowLine>,
+    /// El contenedor cambió desde la primera lectura de esta sesión (C02).
+    pub source_modified: bool,
+    /// La ventana salió de la caché acotada (sin re-descomprimir).
+    pub cached: bool,
+}
+
+/// Construye la ventana (sin validar scope): archivo + caché + líneas.
+fn load_object_window(
+    state: &DesktopState,
+    path: &Path,
+    member: &str,
+    id: &str,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> Result<ObjectWindowDto, CommandError> {
+    if !path.is_file() {
+        return Err(CommandError::new(
+            "invalid_input",
+            format!("El artefacto '{}' no existe.", path.display()),
+        ));
+    }
+    let (object, source_modified, cached) = {
+        let mut cache = state
+            .source_cache
+            .lock()
+            .map_err(|_| CommandError::new("internal", "caché de fuentes envenenada"))?;
+        cache.get_or_load(path, member, id)?
     };
-    let found = found.ok_or_else(|| {
-        CommandError::new(
-            "not_found",
-            format!("El miembro '{member}' no contiene el objeto solicitado."),
-        )
-    })?;
-    Ok(ObjectSourceDto {
-        id: found.object.id.clone(),
-        object_type: found.object.object_type.clone(),
-        package: found.object.package.clone(),
-        member: found.object.member.clone(),
-        container_path: found.object.container_path.clone(),
-        text: found.text.clone(),
-        code_start_line: found.code_start_line,
-        segments: found
+
+    let text_lines: Vec<&str> = object.text.split('\n').collect();
+    let total_lines = text_lines.len();
+    let start = start_line.unwrap_or(1).clamp(1, total_lines.max(1));
+    let end = end_line
+        .unwrap_or(start + 399)
+        .clamp(start, total_lines.max(1));
+    let lines: Vec<SourceWindowLine> = (start..=end)
+        .map(|text_line| SourceWindowLine {
+            text: text_lines[text_line - 1].trim_end_matches('\r').to_string(),
+            text_line: text_line as u32,
+            member_line: object.member_line(text_line as u32),
+        })
+        .collect();
+
+    Ok(ObjectWindowDto {
+        session_id: 0,
+        id: object.object.id.clone(),
+        object_type: object.object.object_type.clone(),
+        package: object.object.package.clone(),
+        member: object.object.member.clone(),
+        container_path: object.object.container_path.clone(),
+        code_start_line: object.code_start_line,
+        segments: object
             .segments
             .iter()
             .map(|s| ObjectSegmentDto {
@@ -483,5 +1121,127 @@ pub fn read_object_source(
                 member_start_line: s.member_start_line,
             })
             .collect(),
+        total_lines,
+        window_start: start,
+        window_end: end,
+        lines,
+        source_modified,
+        cached,
     })
+}
+
+/// Versión testeable sin `State` de Tauri: valida sesión + scope aprobado.
+#[allow(clippy::too_many_arguments)]
+pub fn object_window(
+    state: &DesktopState,
+    session_id: u64,
+    container_path: &str,
+    member: &str,
+    id: &str,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> Result<ObjectWindowDto, CommandError> {
+    let path = PathBuf::from(container_path);
+    {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| CommandError::new("internal", "sesiones envenenadas"))?;
+        let session = sessions.get(session_id).ok_or_else(|| {
+            CommandError::new(
+                "not_found",
+                format!("La sesión de resultados {session_id} no existe o expiró."),
+            )
+        })?;
+        if !is_approved_container(session, &path) {
+            return Err(CommandError::new(
+                "forbidden",
+                format!(
+                    "El artefacto '{}' no pertenece a las fuentes aprobadas de la sesión.",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    let mut dto = load_object_window(state, &path, member, id, start_line, end_line)?;
+    dto.session_id = session_id;
+    Ok(dto)
+}
+
+/// Ventana histórica (C04): el scope son los contenedores registrados por los
+/// hallazgos de la corrida, nunca un path arbitrario.
+#[allow(clippy::too_many_arguments)]
+pub fn history_object_window(
+    state: &DesktopState,
+    run_id: i64,
+    container_path: &str,
+    member: &str,
+    id: &str,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> Result<ObjectWindowDto, CommandError> {
+    let path = PathBuf::from(container_path);
+    let conn = state.conn()?;
+    let containers = audit_dao::containers_for_run(&conn, run_id)
+        .map_err(|e| map_storage("leyendo contenedores del historial", e))?;
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let approved = containers.iter().any(|container| {
+        let recorded = PathBuf::from(container);
+        let recorded_canonical = recorded.canonicalize().unwrap_or(recorded);
+        canonical == recorded_canonical || canonical.starts_with(&recorded_canonical)
+    });
+    if !approved {
+        return Err(CommandError::new(
+            "forbidden",
+            format!(
+                "El artefacto '{}' no pertenece a las fuentes registradas de la corrida {run_id}.",
+                path.display()
+            ),
+        ));
+    }
+    load_object_window(state, &path, member, id, start_line, end_line)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn read_object_window(
+    session_id: u64,
+    container_path: String,
+    member: String,
+    id: String,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    state: State<'_, DesktopState>,
+) -> Result<ObjectWindowDto, CommandError> {
+    object_window(
+        state.inner(),
+        session_id,
+        &container_path,
+        &member,
+        &id,
+        start_line,
+        end_line,
+    )
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn read_history_object_window(
+    run_id: i64,
+    container_path: String,
+    member: String,
+    id: String,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    state: State<'_, DesktopState>,
+) -> Result<ObjectWindowDto, CommandError> {
+    history_object_window(
+        state.inner(),
+        run_id,
+        &container_path,
+        &member,
+        &id,
+        start_line,
+        end_line,
+    )
 }

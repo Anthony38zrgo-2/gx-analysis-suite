@@ -69,15 +69,30 @@ pub fn init_memory_db() -> Result<Connection> {
     init_db_at(Path::new(":memory:"))
 }
 
-/// Return a thread-safe connection pool for GUI/CLI concurrency.
-pub fn get_pool() -> Result<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>> {
-    let manager = r2d2_sqlite::SqliteConnectionManager::file(get_db_path()).with_init(|c| {
+/// Pool de conexiones SQLite (C01): migra/siembra UNA vez por arranque y
+/// entrega conexiones con los pragmas consistentes.
+pub type SqlitePool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
+/// Conexión prestada del [`SqlitePool`].
+pub type PooledSqliteConnection = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
+
+/// Open (creating if necessary) a pool at `path`, running migrations and
+/// seeding exactly once (C01: no por comando).
+pub fn get_pool_at(path: &Path) -> Result<SqlitePool> {
+    if path != Path::new(":memory:") {
+        let _ = init_db_at(path)?;
+    }
+    let manager = r2d2_sqlite::SqliteConnectionManager::file(path).with_init(|c| {
         c.pragma_update(None, "journal_mode", "WAL").ok();
         c.pragma_update(None, "foreign_keys", "ON").ok();
         Ok(())
     });
-    let pool = r2d2::Pool::builder().build(manager)?;
+    let pool = r2d2::Pool::builder().max_size(4).build(manager)?;
     Ok(pool)
+}
+
+/// Return a thread-safe connection pool for GUI/CLI concurrency.
+pub fn get_pool() -> Result<SqlitePool> {
+    get_pool_at(&get_db_path())
 }
 
 #[cfg(test)]

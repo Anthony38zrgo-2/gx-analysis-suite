@@ -18,9 +18,11 @@ pub fn run() {
             commands::get_settings,
             commands::set_settings,
             commands::list_audit_runs,
-            commands::get_audit_issues,
+            commands::get_audit_issues_page,
+            commands::get_findings_page,
             commands::render_text_summary,
-            commands::read_object_source,
+            commands::read_object_window,
+            commands::read_history_object_window,
             commands::save_pdf,
         ])
         .run(tauri::generate_context!())
