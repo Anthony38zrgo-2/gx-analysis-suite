@@ -342,7 +342,9 @@ fn verdict_label(verdict: QgVerdict) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gx_core::models::{AnalysisRequest, AuditMetrics, Issue, ObjectRef, ScanFailure};
+    use gx_core::models::{
+        AnalysisRequest, AuditMetrics, DiscoveryPolicy, Issue, ObjectRef, ScanFailure,
+    };
     use std::path::PathBuf;
 
     fn sample_request() -> AnalysisRequest {
@@ -356,6 +358,7 @@ mod tests {
             },
             record_history: false,
             retain_sensitive_evidence: false,
+            discovery: DiscoveryPolicy::default(),
         }
     }
 

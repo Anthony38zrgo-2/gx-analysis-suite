@@ -14,6 +14,7 @@ fn request(inputs: &[&str], policy: QgPolicy, record_history: bool) -> AnalysisR
         policy,
         record_history,
         retain_sensitive_evidence: false,
+        discovery: Default::default(),
     }
 }
 

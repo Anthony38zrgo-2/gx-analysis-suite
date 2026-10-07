@@ -36,6 +36,15 @@ const verdict = computed<QgVerdict | null>(() => {
 
 const policyLabel = computed(() => selected.value?.policy ?? "n/d");
 
+/** C01: el historial distingue corridas incompletas de las completas. */
+const completionLabel = computed(() => {
+  const value = selected.value?.completion;
+  if (!value || value === "complete") return null;
+  if (value === "partial") return "Corrida PARCIAL: se alcanzó un límite de recursos.";
+  if (value === "cancelled") return "Corrida CANCELADA: cobertura incompleta.";
+  return "Corrida FALLIDA: hubo fallos de escaneo.";
+});
+
 /** C03: filtros client-side sobre las páginas cargadas del historial. */
 const filteredIssues = computed(() => {
   const term = filters.value.search.trim().toLowerCase();
@@ -225,6 +234,13 @@ onMounted(() => void loadRuns());
                   >
                     {{ run.verdict ?? "n/d" }}
                   </span>
+                  <span
+                    v-if="run.completion && run.completion !== 'complete'"
+                    class="ml-1 rounded bg-amber-900/60 px-1.5 py-0.5 font-mono text-[10px] text-amber-200"
+                    :title="`archivos escaneados: ${run.scanned_files}`"
+                  >
+                    {{ run.completion }}
+                  </span>
                 </td>
                 <td class="px-4 py-2 text-right">
                   <button
@@ -257,12 +273,20 @@ onMounted(() => void loadRuns());
         Cargando hallazgos de la corrida…
       </p>
       <template v-else>
+        <p
+          v-if="completionLabel"
+          class="rounded border border-amber-700 bg-amber-950/40 px-4 py-2 text-xs text-amber-200"
+          role="status"
+        >
+          {{ completionLabel }}
+        </p>
         <ResultsView
           :metrics="metrics"
           :verdict="verdict"
           :policy-label="policyLabel"
           :failures="[]"
-          :scanned-files="1"
+          :scanned-files="selected?.scanned_files ?? 1"
+          :completion="selected?.completion ?? null"
           :page="historyPage"
           :loading="false"
           :filters="filters"

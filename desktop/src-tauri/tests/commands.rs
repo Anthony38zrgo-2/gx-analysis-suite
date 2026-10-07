@@ -39,6 +39,7 @@ fn gui_request(inputs: Vec<PathBuf>, record_history: bool) -> AnalysisRequest {
         },
         record_history,
         retain_sensitive_evidence: false,
+        discovery: Default::default(),
     }
 }
 

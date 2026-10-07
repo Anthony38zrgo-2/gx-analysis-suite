@@ -289,7 +289,7 @@ Taint tracking requires more than textual matching: it models propagation that m
 
 ## 5. Measurement corpus and proposed budgets
 
-These are initial acceptance proposals for the benchmark phase. Calibrate absolute ceilings against the chosen Windows reference machine and real export corpus; do not present them as current guarantees.
+These are initial acceptance proposals for the benchmark phase. Calibrate absolute ceilings against the chosen Windows reference machine and real export corpus; do not present them as current guarantees. Calibration and measured evidence: §18.
 
 | Workload | Purpose | Measurement |
 |---|---|---|
@@ -346,7 +346,7 @@ This review makes no production-code change. The next implementation should firs
 Scope implemented on top of `fb22874` in the working tree (no commit created).
 All probes above are now regression tests.
 
-**A01 — Request and coverage validation.**
+**A01 — Request and coverage validation (completion log in §15).**
 - `gx_core::validation` (schema, inputs, non-empty/duplicate rule set, finite
   percentage 0–100) + `runtime::validate_request` (concrete registry IDs).
   `analyze` itself validates, so no caller can obtain an unqualified PASS.
@@ -375,13 +375,13 @@ All probes above are now regression tests.
   `baseline_manifest.json` hash refreshed. Golden is now 23 findings
   (15 ERROR / 8 WARNING).
 
-**A04 — Budgets and job lifecycle.**
+**A04 — Budgets and job lifecycle (RAR: §16; envelope/calibración: §18).**
 - `ExecutionBudget` (input/expanded/member bytes, members, objects, findings,
   deadline, workers); text/XML reads and archive loops enforce it and return
   partial outcomes instead of silent truncation.
 - Cancellation checkpoints in discovery, XML event loop, archive members,
   objects and every 512 lines; native RAR remains non-interruptible and is
-  documented as such.
+  documented as such (A04.6 evaluation in §16).
 - `ScanCompletion` (`complete`/`partial`/`cancelled`/`failed`) always yields
   `verdict = error` unless complete; findings already computed are preserved.
 - Desktop: per-invocation `ScanId`/token behind a single active scan; a second
@@ -403,7 +403,7 @@ All probes above are now regression tests.
   invocations, rule factories, findings) instead of timing, so it can block
   in CI.
 
-**E01 — Reproducible builds and architecture gates (partial).**
+**E01 — Reproducible builds and architecture gates (partial; completion log in §14).**
 - Application `Cargo.lock` files are no longer ignored and CI runs
   `--locked`; CI targets `master`.
 - MSRV is declared as the maximum `rust-version` of the dependency graph
@@ -504,7 +504,7 @@ All probes above are now regression tests.
 
 ## 10. Implementation log — Phase C (C01–C04)
 
-**C01 — Bounded results and persistence.**
+**C01 — Bounded results and persistence (completion log in §17).**
 - `audit_dao`: issue insertion uses ONE cached prepared statement per run;
   keyset pagination for runs (`before_id`) and issues (`(severity_rank, id)`
   cursor); `prune_runs` retention with `ON DELETE CASCADE`; `containers_for_run`
@@ -699,3 +699,182 @@ All probes above are now regression tests.
   for the standard profile, warm cache on the second run).
 - Bench gates pass for `small-files`, `wide-xml` (XML re-extraction counted)
   and `real`; the real corpus keeps 549 findings (no new false positives).
+
+## 14. Implementation log — E01 completion
+
+**E01 — Reproducible builds and architecture gates (closed).**
+- Timing comparison gate: `cargo xtask bench --baseline FILE --out FILE`
+  compares a release run against a previous `gx-bench/2` report captured on a
+  consistent runner. Structural equivalence is enforced before comparing
+  (schema, corpus scenario + SHA-256, rule set, OS/arch, `rustc --version`,
+  >=5 repeated runs), so a comparison between non-equivalent runs is not
+  evidence. A sustained median/throughput regression above 10% or a peak
+  working-set increase above 15% (both configurable) fails the command after
+  an automatic retry (`--baseline-retries`, default 1, per §5 "re-run before
+  blocking for timing noise"). The report is always written, including a
+  `baseline_comparison` object with the deltas, thresholds, regressions and
+  comparability notes.
+- CI: `.github/workflows/bench-consistent.yml` (manual `workflow_dispatch`)
+  runs the comparison on a self-hosted runner labeled `gx-benchmark` and
+  uploads the report as an artifact. Shared runners are deliberately excluded
+  for timing; `bench-gates` keeps blocking there with deterministic
+  operation-counts. Baselines are captured on that runner with the documented
+  command and committed under `perf/`; the job fails fast if the baseline is
+  missing.
+- `bench-gates` on the shared runner now covers all six scenarios
+  (`small-files`, `wide-xml`, `clean`, `diagnostic-heavy`, `long-lines`,
+  `real`).
+- Desktop workspace now runs `cargo fmt --check` and
+  `clippy --locked --all-targets -- -D warnings` in CI. The NSIS artifact
+  path is no longer hardcoded: `cargo metadata` resolves the effective
+  `target_directory` (the root `.cargo/config.toml` fixes `target-dir`) and
+  the installer is asserted before upload.
+- Verification: `cargo test -p xtask` (6 tests) covers the threshold
+  decision; the gate was exercised end-to-end (within-threshold pass,
+  sustained regression -> exit 1 with the report written, corpus mismatch
+  rejected); `diagnostic-heavy` and `long-lines` bench gates pass locally;
+  desktop `cargo fmt --check` and `clippy -D warnings`: clean.
+- Remaining known limitation: the timing thresholds only become actionable
+  once a baseline from the reference runner is committed; until then the
+  deterministic gates and `--check` scenarios remain the CI evidence.
+
+## 15. Implementation log — A01 completion
+
+**A01 — Shared request and coverage validation (closed; A01.3/A01.5 leftovers).**
+- `DiscoveryPolicy` is part of the shared `AnalysisRequest`
+  (`gx_core::models`): `include`/`exclude` globs relative to each scan root,
+  an explicit `ignore_file` (one pattern per line, `#` comments) and the
+  symlink/hidden policies. The field uses serde defaults and is omitted from
+  the JSON contract when default, so existing requests and stored results
+  keep their framing.
+- `gx_sources::filesystem` compiles the policy once per run
+  (`DiscoveryOptions`, `globset`). `validate_discovery` is called by the
+  shared `validate_request`, so CLI (exit 2), desktop (`CommandError`) and the
+  library reject invalid globs or an unreadable ignore file before reading
+  source. Discovery still reports exclusions and walk errors; overlapping
+  roots keep deduping by canonical identity.
+- Documented behavior: the extension policy remains the base filter (an
+  include glob cannot enable unsupported extensions); globs apply to
+  directory discovery with `/` separators (an explicitly passed file is only
+  validated by extension); hidden files and directories are skipped unless
+  `include_hidden`; symlinks to directories are not traversed unless
+  `follow_symlinks` (symlinked source files are read; cycles are reported as
+  discovery errors).
+- CLI: `gx scan` gains `--include`, `--exclude`, `--ignore-file`,
+  `--follow-symlinks` and `--include-hidden`.
+- Desktop: `AnalysisRequest.discovery` is optional in the TS contract; the
+  contract samples now carry a non-default policy and were regenerated with
+  the documented ignored generator.
+- Tests: `gx_sources` unit tests (include/exclude, ignore file and comments,
+  invalid glob, hidden policy, symlink follow), `trust_boundary.rs` engine
+  cases (globs restrict the scan, missing ignore file invalid, invalid glob
+  invalid, hidden policy, explicit-file bypass, default policy omitted from
+  JSON) and a CLI matrix case (flags apply; invalid glob/missing ignore file
+  -> exit 2). Totals: `cargo test --workspace` 188 tests passed; desktop 15 +
+  contract test; `npm run build` (vue-tsc + vite) passed; clippy/fmt clean in
+  both workspaces; `bench --check` passes for `small-files` and `real` (549
+  real findings unchanged, no discovery false positives).
+
+## 16. Implementation log — A04.6 (native RAR evaluation)
+
+**A04.6 — Noninterruptible native RAR operations (closed).**
+- Documented contract (module docs of `gx_sources::xpz_extractor` + README):
+  UnRAR `read()` completes a whole member inside the native library, so
+  cooperative cancellation is only observable at member/object boundaries,
+  never inside the native read.
+- Containment is enforced BEFORE touching the decoder: the member header's
+  `unpacked_size` is checked against `max_member_bytes`, and
+  `max_members`/`max_expanded_bytes` accumulate member by member;
+  `max_input_bytes` is checked on the container before opening it. An
+  oversized member is therefore never decompressed, and a lying header is
+  malformed input that the native decoder rejects or truncates.
+- Evaluation evidence:
+  - deterministic tests in `gx_sources`: the RAR fixture extracts complete
+    within the default budget (5 recognized GXObjects); `max_member_bytes =
+    1` yields `partial` from the header check with zero objects (no native
+    read); a pre-set token cancels before opening the archive; and a token
+    set after the first object stops the stream at the next boundary
+    (`limit: None`, `cancelled: true`).
+  - measurement: `cargo xtask bench --scenario real --runs 5` (corpus with
+    the RAR export) reports 9.0–10.2 ms extraction for the four packages and
+    2.0–2.5 ms cancellation acknowledgment; the RAR fixture (24,558 bytes,
+    KB-scale members) decodes in sub-millisecond time per member.
+- Verdict: NO cancellable worker process. The library meets containment and
+  the §5 cooperative-stop target on the reference envelope; the residual
+  worst case is decoding one member at the `max_member_bytes` ceiling
+  (32 MiB), which could exceed ~500 ms on the slowest decoders. Reconsider a
+  worker process (or lower the archive member cap) only if
+  `max_member_bytes` is raised so a single member can exceed the deadline,
+  or if a hard cancellation deadline must be guaranteed against adversarial
+  archives.
+- Verification: `cargo test --workspace` 192 tests passed (gx_sources 33,
+  with the four new RAR cases); clippy/fmt clean.
+
+## 17. Implementation log — C01 completion
+
+**C01 — Full run snapshot in history (closed leftovers).**
+- Migration V006 adds `scanned_files`, `completion`, `coverage_json`,
+  `request_json`, `parser_version` and `schema_version` to `audit_runs`
+  (additive `ALTER TABLE`; existing rows keep NULL/0).
+- `AuditRun::from_analysis` now persists the real scanned-file count (not
+  the declared inputs), the completion state
+  (`complete`/`partial`/`cancelled`/`failed`), the serialized `ScanCoverage`,
+  the effective `AnalysisRequest` (rules, policy, discovery flags), the
+  semantic parser version and the result schema version. `file_hash` is now
+  populated by `source_digest`: SHA-256 of the content for a single file
+  input, and SHA-256 of the declared-input identity (canonical path +
+  size/mtime) for multiple/directory inputs without walking the tree
+  (per-file content change detection remains C02's `source_modified`).
+- `AuditRunSummary` exposes `completion` and `scanned_files`; the desktop
+  history table badges non-complete runs and the run detail passes
+  completion/scanned files to the results view instead of the hardcoded `1`.
+- Tests: `from_analysis_captures_full_snapshot` (scanned count, completion,
+  coverage/request JSON, versions, digest),
+  `history_summary_exposes_completion_and_scanned_files` (DB round-trip plus
+  raw columns), `source_digest_of_single_file_hashes_content` (known
+  SHA-256) and the migration test now asserts the V006 columns.
+- Verification: `cargo test --workspace` 195 tests passed; desktop 15 +
+  contract test; `npm run build` (vue-tsc + vite) passed; clippy/fmt clean in
+  both workspaces.
+
+## 18. Implementation log — measured evidence (§5 gates)
+
+**§5 — Measured evidence and calibration (automatable gates closed).**
+- Linearity: `cargo xtask bench --check --scaling` evaluates the same
+  generator at N and 2N files and fails outside [1.7x, 2.3x] on deterministic
+  counters (lines, objects, parser invocations, rule evaluations, findings).
+  CI runs it for `small-files`, `wide-xml`, `clean`, `diagnostic-heavy` and
+  `long-lines`; all report `doubling_lines=2.00x` (timing ratios 0.9–1.4x are
+  printed as evidence but never block on shared runners).
+- Envelope: `--max-peak-mib` gates the process peak working set; CI applies
+  512 MiB to all six scenarios. Calibration measurements (release):
+  - `small-files` 1M lines / 833.5k findings: 886.6 MiB peak → over budget.
+  - `wide-xml` 200k objects / 1M findings: 744 MiB peak → over budget.
+  - `wide-xml` 50k objects / 250k findings: 355 MiB; `long-lines` 80 MB:
+    244 MiB.
+  The model (base ~21 MiB + ~1.06 KiB/finding + ~1.07 KiB/object + full line
+  evidence) led to `max_findings = 300_000` / `max_objects = 100_000` in
+  `ExecutionBudget` and to a RUN-WIDE findings budget in the engine: inputs
+  are evaluated in fixed ordered chunks of 8 with a per-file share of the
+  remaining budget, so the retained subset is deterministic and the transient
+  memory is bounded (the per-file check alone never bounded the total). After
+  the change: 1M lines → 300,008 findings, 378–380 MiB; 200k objects →
+  300,160 findings (60k objects evaluated), 391–392 MiB; both `< 512`, both
+  `partial` with explicit failures. New engine test
+  `findings_limit_is_run_wide_and_deterministic`.
+- Desktop response: `desktop/src-tauri/tests/latency.rs` measures the IPC
+  boundary over a 50k-finding session (SessionStore ceiling) with a 200 ms
+  p95 budget. Measured in debug (CI): page 18.8 ms, severity filter 19.7 ms,
+  search 95.0 ms, source window 1.4 ms (cached). WebView2 client-side
+  rendering latencies stay instrumented through C03
+  (`pageLatencyMs`/`windowLatencyMs`); capturing them automatically needs a
+  WebDriver session on the reference machine and remains an interactive step.
+- Standard-profile regression: the E01 `--baseline` harness was exercised on
+  this machine (5 runs, `real`): median +1.84% and peak working set +0.34%
+  against a freshly captured baseline → BASELINE OK. The authoritative
+  baseline still must be captured on the pinned runner
+  (`.github/workflows/bench-consistent.yml`).
+- Verification: `cargo test --workspace` 196 tests passed; desktop 15 +
+  latency + contract test; `npm run build` (vue-tsc + vite) passed; clippy/fmt
+  clean in both workspaces; all six `bench --check` gates pass with
+  `--scaling --max-peak-mib 512`.

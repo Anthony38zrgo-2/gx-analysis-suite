@@ -60,6 +60,20 @@ export type QgPolicy =
 
 export type QgVerdict = "pass" | "reject" | "error";
 
+/** A01.5: política explícita de descubrimiento de fuentes. */
+export interface DiscoveryPolicy {
+  /** Globs de inclusión relativos al root (vacío = todos los fuente). */
+  include?: string[];
+  /** Globs de exclusión (dominan sobre include). */
+  exclude?: string[];
+  /** Archivo de patrones de ignorado (uno por línea, `#` comenta). */
+  ignore_file?: string;
+  /** Seguir symlinks a directorios (default false). */
+  follow_symlinks?: boolean;
+  /** Incluir archivos y directorios ocultos (default false). */
+  include_hidden?: boolean;
+}
+
 export interface AnalysisRequest {
   schema_version: number;
   inputs: string[];
@@ -68,6 +82,8 @@ export interface AnalysisRequest {
   record_history: boolean;
   /** D03: retención opt-in de evidencia sensible (default false: redactada). */
   retain_sensitive_evidence?: boolean;
+  /** A01.5: política explícita de descubrimiento (include/exclude/ignore). */
+  discovery?: DiscoveryPolicy;
 }
 
 /** D03: paso de una traza acotada source→sink. */
@@ -200,6 +216,10 @@ export interface AuditRunSummary {
   verdict: string | null;
   policy: string | null;
   qg_passed: boolean;
+  /** C01: completitud de la corrida; null en bases anteriores a V006. */
+  completion?: ScanCompletion | null;
+  /** C01: archivos realmente escaneados. */
+  scanned_files: number;
 }
 
 export type ScanProgressEvent =

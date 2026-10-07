@@ -112,6 +112,7 @@ pub fn validate_request_shape(request: &AnalysisRequest) -> Result<(), Validatio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::DiscoveryPolicy;
     use std::path::PathBuf;
 
     fn base_request() -> AnalysisRequest {
@@ -125,6 +126,7 @@ mod tests {
             },
             record_history: false,
             retain_sensitive_evidence: false,
+            discovery: DiscoveryPolicy::default(),
         }
     }
 

@@ -24,6 +24,7 @@ fn request(inputs: Vec<PathBuf>, rules: &[&str]) -> AnalysisRequest {
         },
         record_history: false,
         retain_sensitive_evidence: false,
+        discovery: Default::default(),
     }
 }
 

@@ -20,6 +20,31 @@
 //! cero objetos/hallazgos (se emite un warning). Un layout sin objetos
 //! GeneXus ni `<Events>` (markup arbitrario) se rechaza como "no soportado"
 //! y nunca se lintea como XML de marca.
+//!
+//! ## A04.6 — RAR nativo: ventana no interrumpible
+//!
+//! La descompresión RAR usa la librería nativa UnRAR y es una llamada
+//! opaca: la lectura nativa completa un miembro entero antes de volver, así
+//! que la cancelación cooperativa se observa en los LÍMITES de miembro (y
+//! antes de cada objeto pendiente), nunca dentro de la lectura nativa.
+//!
+//! Contención garantizada ANTES de tocar el decodificador:
+//! - el tamaño declarado en el header (`unpacked_size`) se verifica contra
+//!   `max_member_bytes`; un miembro que excede el tope NO se descomprime;
+//! - `max_members` y `max_expanded_bytes` se acumulan miembro a miembro;
+//! - `max_input_bytes` se verifica sobre el contenedor antes de abrirlo.
+//!
+//! Por tanto la ventana no interrumpible queda acotada por la decodificación
+//! de UN miembro de a lo sumo `max_member_bytes` (default 32 MiB; en el
+//! corpus de referencia los miembros son de KB). Un header que mienta sobre
+//! el tamaño es entrada malformada: el decodificador nativo falla o respeta
+//! el tamaño declarado.
+//!
+//! Evaluación A04.6: NO se usa un proceso worker cancelable. Se
+//! reconsideraría si `max_member_bytes` sube hasta que un solo miembro
+//! exceda el objetivo de parada cooperativa (~500 ms) en el peor caso, o si
+//! el producto exigiera un deadline duro frente a archives adversarios.
+//! Evidencia y decisión en el roadmap §16.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -283,8 +308,11 @@ impl<'a> SourceObjectStream<'a> {
                     if *exhausted {
                         return Ok(Step::Done);
                     }
-                    // Nota A04: unrar es una operación nativa no interrumpible;
-                    // el checkpoint se evalúa entre miembros, no dentro de `read()`.
+                    // A04.6: `state.read()` es una lectura nativa no
+                    // interrumpible; el checkpoint de cancelación corre antes
+                    // de cada header/objeto (ver docs del módulo). La ventana
+                    // no interrumpible está acotada por `max_member_bytes`,
+                    // ya verificado contra el header de este miembro.
                     let Some(current) = archive.take() else {
                         *exhausted = true;
                         return Ok(Step::Done);
@@ -1183,6 +1211,13 @@ mod tests {
         std::env::temp_dir().join(name)
     }
 
+    /// Export real empaquetado con RAR (5 objetos, 1 con código).
+    #[cfg(feature = "archives")]
+    fn real_rar_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/sources/real/HJFCP716.xpz")
+    }
+
     #[test]
     fn txt_extract_is_identity() {
         let p = tmp("gx_xpz_test.txt");
@@ -1558,6 +1593,71 @@ EndSub
         assert!(outcome.cancelled);
         assert!(outcome.objects.is_empty());
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// A04.6: el paquete RAR real extrae completo dentro del presupuesto por
+    /// defecto (baseline de la evaluación).
+    #[cfg(feature = "archives")]
+    #[test]
+    fn rar_extraction_completes_within_default_budget() {
+        let p = real_rar_fixture();
+        assert!(p.is_file(), "fixture RAR ausente: {}", p.display());
+        let outcome =
+            extract_source_objects_with_budget(&p, &ExecutionBudget::default(), None).unwrap();
+        assert!(outcome.limit.is_none(), "{:?}", outcome.limit);
+        assert!(!outcome.cancelled);
+        assert_eq!(outcome.gx_objects, 5, "objetos GeneXus reconocidos");
+        assert!(!outcome.objects.is_empty(), "hay un objeto con código");
+    }
+
+    /// A04.6: el límite por miembro se decide desde el header ANTES de la
+    /// lectura nativa: el paquete queda en `partial` sin producir objetos.
+    #[cfg(feature = "archives")]
+    #[test]
+    fn rar_member_limit_is_partial_before_native_read() {
+        let p = real_rar_fixture();
+        let budget = ExecutionBudget {
+            max_member_bytes: 1,
+            ..Default::default()
+        };
+        let outcome = extract_source_objects_with_budget(&p, &budget, None).unwrap();
+        let limit = outcome.limit.expect("debe cortar por presupuesto");
+        assert!(limit.contains("máximo por miembro"), "{limit}");
+        assert!(outcome.objects.is_empty());
+        assert!(!outcome.cancelled);
+    }
+
+    /// A04.6: un token pre-seteado corta ANTES de abrir/decodificar el RAR.
+    #[cfg(feature = "archives")]
+    #[test]
+    fn rar_cancellation_before_open_reports_cancelled() {
+        let p = real_rar_fixture();
+        let cancel = AtomicBool::new(true);
+        let outcome =
+            extract_source_objects_with_budget(&p, &ExecutionBudget::default(), Some(&cancel))
+                .unwrap();
+        assert!(outcome.cancelled);
+        assert!(outcome.limit.is_none());
+        assert!(outcome.objects.is_empty());
+    }
+
+    /// A04.6: la cancelación se observa en el límite de miembro/objeto: tras
+    /// el primer objeto, el token detiene el flujo sin leer el resto.
+    #[cfg(feature = "archives")]
+    #[test]
+    fn rar_cancellation_is_observed_at_member_boundary() {
+        let p = real_rar_fixture();
+        let cancel = AtomicBool::new(false);
+        let budget = ExecutionBudget::default();
+        let mut stream = source_object_stream(&p, &budget, Some(&cancel)).unwrap();
+        let first = stream.next().expect("primer objeto").expect("sin error");
+        assert!(!first.text.is_empty());
+
+        cancel.store(true, Ordering::Relaxed);
+        assert!(stream.next().is_none(), "la cancelación corta el flujo");
+        let (limit, cancelled) = stream.finish_flags();
+        assert!(cancelled);
+        assert!(limit.is_none(), "no es un corte por presupuesto: {limit:?}");
     }
 
     #[test]

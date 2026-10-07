@@ -231,7 +231,7 @@ pub fn seed_if_empty(conn: &Connection, csv_path: &Path) -> Result<usize> {
 
 /// GX-009: inicializa el catálogo desde el REGISTRY COMPILADO.
 ///
-/// Inserta las 30 reglas (24 concretas + 6 abstractas) con metadatos del
+/// Inserta las 34 reglas (28 concretas + 6 abstractas) con metadatos del
 /// código mismo — no hay forma de divergencia catálogo↔registry. Idempotente
 /// (`INSERT OR IGNORE`): una segunda corrida NO modifica flags de usuario.
 pub fn seed_from_registry(conn: &Connection) -> Result<usize> {

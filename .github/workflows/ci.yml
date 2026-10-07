@@ -90,10 +90,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo run --locked --release -p xtask -- bench --check --scenario small-files --files 5 --lines 200
-      - run: cargo run --locked --release -p xtask -- bench --check --scenario wide-xml --files 2 --lines 25
-      - run: cargo run --locked --release -p xtask -- bench --check --scenario clean --files 3 --lines 100
-      - run: cargo run --locked --release -p xtask -- bench --check --scenario real
+      # §5: gates deterministas (operation-counts) + escalado ~2x + envelope
+      # de 512 MiB del proceso de análisis. El timing no bloquea en shared.
+      - run: cargo run --locked --release -p xtask -- bench --check --scenario small-files --files 5 --lines 200 --scaling --max-peak-mib 512
+      - run: cargo run --locked --release -p xtask -- bench --check --scenario wide-xml --files 2 --lines 25 --scaling --max-peak-mib 512
+      - run: cargo run --locked --release -p xtask -- bench --check --scenario clean --files 3 --lines 100 --scaling --max-peak-mib 512
+      - run: cargo run --locked --release -p xtask -- bench --check --scenario diagnostic-heavy --files 3 --lines 120 --scaling --max-peak-mib 512
+      - run: cargo run --locked --release -p xtask -- bench --check --scenario long-lines --files 3 --lines 60 --scaling --max-peak-mib 512
+      - run: cargo run --locked --release -p xtask -- bench --check --scenario real --max-peak-mib 512
 
   # GX-015..GX-018: desktop Tauri 2 + Vue. No depende de los jobs del
   # engine/CLI y estos no dependen de Node.
@@ -111,11 +115,32 @@ jobs:
         working-directory: desktop
       - run: npm run build
         working-directory: desktop
+      # E01: fmt/clippy del workspace desktop (tiene su propio Cargo.lock).
+      - run: cargo fmt --all -- --check
+        working-directory: desktop/src-tauri
+      - run: cargo clippy --locked --all-targets -- -D warnings
+        working-directory: desktop/src-tauri
       - run: cargo test --locked
         working-directory: desktop/src-tauri
       - run: npm run tauri build
         working-directory: desktop
+      # E01: resolver el target directory EFECTIVO del workspace desktop
+      # (el `.cargo/config.toml` del root fija target-dir) y verificar el
+      # artefacto antes de publicarlo.
+      - name: Verificar instalador NSIS
+        id: installer
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --no-deps | ConvertFrom-Json
+          $target = $metadata.target_directory
+          $installers = @(Get-ChildItem -Path (Join-Path $target 'release/bundle/nsis/*.exe') -ErrorAction SilentlyContinue)
+          if ($installers.Count -eq 0) {
+            throw "No se encontró el instalador NSIS bajo '$target/release/bundle/nsis'"
+          }
+          $installer = $installers[0]
+          "installer=$($installer.FullName)" >> $env:GITHUB_OUTPUT
+          Write-Host "NSIS: $($installer.FullName) ($($installer.Length) bytes)"
       - uses: actions/upload-artifact@v4
         with:
           name: gx-linter-nsis
-          path: target/release/bundle/nsis/*.exe
+          path: ${{ steps.installer.outputs.installer }}

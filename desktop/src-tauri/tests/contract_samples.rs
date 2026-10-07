@@ -13,8 +13,8 @@
 use std::path::{Path, PathBuf};
 
 use gx_core::models::{
-    AnalysisRequest, AnalysisResult, AuditMetrics, Issue, ObjectRef, PackCoverage, QgPolicy,
-    QgVerdict, ScanCompletion, ScanCoverage, SecuritySummary, Severity, TraceStep,
+    AnalysisRequest, AnalysisResult, AuditMetrics, DiscoveryPolicy, Issue, ObjectRef, PackCoverage,
+    QgPolicy, QgVerdict, ScanCompletion, ScanCoverage, SecuritySummary, Severity, TraceStep,
 };
 use gx_linter_desktop_lib::commands::{
     FindingsPageDto, HistoryIssuesPageDto, ObjectSegmentDto, ObjectWindowDto, ScanSummaryDto,
@@ -34,6 +34,14 @@ fn sample_request() -> AnalysisRequest {
         },
         record_history: false,
         retain_sensitive_evidence: false,
+        // A01.5: sample no-default para que el contrato fije la política.
+        discovery: DiscoveryPolicy {
+            include: vec!["**/*.xml".to_string()],
+            exclude: vec!["generated/**".to_string()],
+            ignore_file: Some(PathBuf::from("gx.ignore")),
+            follow_symlinks: true,
+            include_hidden: true,
+        },
     }
 }
 

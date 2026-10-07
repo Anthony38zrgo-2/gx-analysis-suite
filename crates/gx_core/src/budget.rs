@@ -8,6 +8,22 @@ use std::time::{Duration, Instant};
 /// Límites por corrida. Los valores por defecto son los del review (A04):
 /// lectura acotada para texto/XML, expansión acotada para paquetes y un
 /// presupuesto de proceso de ~512 MiB activo.
+///
+/// Calibración medida (§5 envelope, `cargo xtask bench` en release):
+/// - findings retenidos: 208,350 → 237 MiB; 833,500 → 887 MiB ⇒ ~1.06 KiB por
+///   finding (líneas cortas) sobre una base de ~21 MiB. Con
+///   `max_findings = 300,000` el término de findings queda en ~318 MiB.
+/// - objetos: 20k → 168 MiB; 50k → 355 MiB con 5 findings/objeto ⇒ ~1.07 KiB
+///   por objeto además de sus findings; 100k objetos ≈ 107 MiB.
+/// - evidencia de líneas largas: ~4.3 KiB por finding de 4 KiB (el
+///   `line_content` completo se conserva); 20k findings ≈ 86 MiB.
+///
+/// Modelo: 21 MiB + 1.06 KiB×findings + 1.07 KiB×objetos + bytes de
+/// evidencia larga. Con el corte de CORRIDA medido (chunks ordenados de 8 con
+/// cuota por archivo): 1M líneas → 300k findings, 378–380 MiB; 200k objetos →
+/// 300k findings, 391–392 MiB; ambos por debajo de 512 MiB y en `partial`.
+/// Un corpus patológico de líneas de 64 MiB puede acercarse al techo y el
+/// corte produce `partial` (nunca PASS silencioso).
 #[derive(Debug, Clone)]
 pub struct ExecutionBudget {
     /// Máximo de bytes de un artefacto de entrada (texto/XML y también el
@@ -36,8 +52,9 @@ impl Default for ExecutionBudget {
             max_expanded_bytes: 64 * 1024 * 1024,
             max_member_bytes: 32 * 1024 * 1024,
             max_members: 4096,
-            max_objects: 200_000,
-            max_findings: 1_000_000,
+            // §5: calibrado desde la amplificación medida (ver doc del tipo).
+            max_objects: 100_000,
+            max_findings: 300_000,
             deadline: None,
             workers: None,
         }

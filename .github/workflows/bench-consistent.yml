@@ -1,0 +1,79 @@
+name: bench-consistent
+
+# E01: comparación de performance contra un baseline capturado en un runner
+# CONSISTENTE (self-hosted, label `gx-benchmark`). No corre en runners
+# GitHub-hosted a propósito: el timing de un runner compartido no es una
+# medida comparable. El CI compartido ya bloquea con los gates deterministas
+# de operation-counts (`bench-gates` en ci.yml).
+#
+# Requisitos del runner: Windows, Rust stable, label `gx-benchmark` (la
+# máquina debe estar quieta: sin antivirus/CI concurrente).
+#
+# Baselines: se capturan en esa misma máquina con
+#   cargo run --locked --release -p xtask -- bench --scenario <s> --runs 5 \
+#     --out perf/BENCH-<s>.json
+# y se commitean en `perf/`. La comparación falla si el corpus, el set de
+# reglas, el compilador o la máquina no coinciden, o si la mediana/throughput
+# sube >10% (o el peak working set >15%) de forma SOSTENIDA (reintento
+# automático incluido).
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Escenario del benchmark
+        required: true
+        default: small-files
+        type: choice
+        options:
+          - small-files
+          - diagnostic-heavy
+          - clean
+          - long-lines
+          - wide-xml
+          - real
+      baseline:
+        description: Baseline committed (gx-bench/2) para el escenario
+        required: false
+        default: perf/BENCH-small-files.json
+      runs:
+        description: Corridas repetidas (>= 5)
+        required: false
+        default: "5"
+
+jobs:
+  compare:
+    runs-on: [self-hosted, windows, gx-benchmark]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Baseline presente
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${{ inputs.baseline }}")) {
+            throw "Falta '${{ inputs.baseline }}'. Capturalo en este runner: cargo run --locked --release -p xtask -- bench --scenario ${{ inputs.scenario }} --runs ${{ inputs.runs }} --out ${{ inputs.baseline }}"
+          }
+
+      - name: El árbol está limpio (sin cambios sin commitear)
+        shell: pwsh
+        run: |
+          if (git status --porcelain) {
+            throw "Hay cambios sin commitear: la medición debe corresponder a un commit"
+          }
+
+      - name: bench + comparación contra baseline
+        shell: pwsh
+        run: >
+          cargo run --locked --release -p xtask -- bench
+          --scenario ${{ inputs.scenario }}
+          --runs ${{ inputs.runs }}
+          --baseline "${{ inputs.baseline }}"
+          --out "target/bench/current-${{ inputs.scenario }}.json"
+
+      - name: Subir reporte (evidencia)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ inputs.scenario }}
+          path: target/bench/current-*.json
+          if-no-files-found: warn

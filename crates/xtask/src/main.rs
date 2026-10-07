@@ -3,10 +3,14 @@
 //! Comandos:
 //! - `cargo xtask build` / `build-debug`: build del workspace + copia a dist/.
 //! - `cargo xtask bench [--release] [--scenario NAME] [--lines N] [--files N]`
-//!   `[--objects N] [--runs R] [--out FILE] [--check]`:
+//!   `[--objects N] [--runs R] [--out FILE] [--check] [--baseline FILE]`:
 //!   harness de benchmark de release con corpus fijo, CPU/allocations/peak
 //!   working set, latencia de cancelación y resultados JSON machine-readable.
-//!   `--check` verifica operation-counts deterministas (gate de CI).
+//!   `--check` verifica operation-counts deterministas (gate de CI compartido);
+//!   con `--scaling` corre el corpus al doble y exige ~2x de trabajo, y
+//!   `--max-peak-mib` es el techo del envelope de memoria del proceso.
+//!   `--baseline` compara contra un reporte previo capturado en un runner
+//!   consistente (E01): mediana/throughput y peak working set con umbrales.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
@@ -21,7 +25,7 @@ use gx_core::models::{AnalysisRequest, QgPolicy};
 use gx_core::stats::{self, ScanStats};
 use gx_sources::filesystem::discover_source_files;
 use gx_sources::xpz_extractor::extract_source_objects_with_budget;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Allocator contador (A02.3): mide llamadas y bytes reservados por fase.
@@ -112,6 +116,12 @@ fn print_help() {
     println!("    --runs R             corridas repetidas (default 5)");
     println!("    --out FILE           escribe el JSON en FILE (default stdout)");
     println!("    --check              gate determinista de operation-counts (CI)");
+    println!("    --scaling            con --check: corre al doble y exige ~2x de trabajo");
+    println!("    --max-peak-mib N     techo de peak working set del proceso (§5 envelope)");
+    println!("    --baseline FILE      compara contra un reporte previo (runner consistente)");
+    println!("    --baseline-retries N reintentos ante regresión por ruido (default 1)");
+    println!("    --max-regression-pct N        umbral de mediana/throughput (default 10)");
+    println!("    --max-memory-regression-pct N umbral de peak working set (default 15)");
 }
 
 fn build(release: bool) -> anyhow::Result<()> {
@@ -262,6 +272,19 @@ struct BenchArgs {
     out: Option<PathBuf>,
     require_release: bool,
     check: bool,
+    /// E01: baseline previo para comparar mediana/throughput y memoria.
+    baseline: Option<PathBuf>,
+    /// §5: re-corridas completas antes de declarar la regresión sostenida.
+    baseline_retries: usize,
+    /// §5: investigar una caída de mediana/throughput mayor a este %.
+    max_regression_pct: f64,
+    /// §5: investigar un aumento de peak working set mayor a este %.
+    max_memory_regression_pct: f64,
+    /// §5 (linealidad): con `--check`, corre el corpus al doble y exige ~2x
+    /// de trabajo determinista (alarma > 2.3x).
+    scaling: bool,
+    /// §5 (envelope): techo de peak working set del proceso en MiB.
+    max_peak_mib: Option<u64>,
 }
 
 impl Default for BenchArgs {
@@ -275,6 +298,12 @@ impl Default for BenchArgs {
             out: None,
             require_release: true,
             check: false,
+            baseline: None,
+            baseline_retries: 1,
+            max_regression_pct: 10.0,
+            max_memory_regression_pct: 15.0,
+            scaling: false,
+            max_peak_mib: None,
         }
     }
 }
@@ -309,56 +338,158 @@ fn bench(args: &[String]) -> Result<()> {
         },
         record_history: false,
         retain_sensitive_evidence: false,
+        discovery: gx_core::models::DiscoveryPolicy::default(),
     };
     let budget = ExecutionBudget::default();
 
     if options.check {
         let run = run_once(0, &request, &enabled, &budget, true)?;
         check_gates(&manifest, &run, enabled.len())?;
+        check_peak(&run, options.max_peak_mib)?;
+
+        // §5 (linealidad): el MISMO generador al doble de archivos debe
+        // producir ~2x de trabajo determinista; medimos también el tiempo
+        // como evidencia (no bloquea en runner compartido).
+        let mut scaling_note = String::new();
+        if options.scaling {
+            let doubled = BenchArgs {
+                files: options.files * 2,
+                ..options.clone()
+            };
+            let doubled_manifest = generate_corpus(&doubled)?;
+            let doubled_run = run_once(1, &request, &enabled, &budget, true)?;
+            check_gates(&doubled_manifest, &doubled_run, enabled.len())?;
+            check_peak(&doubled_run, options.max_peak_mib)?;
+            let time_ratio = check_scaling(&run, &doubled_run)?;
+            scaling_note = format!(
+                " doubling_lines={:.2}x doubling_time={:.2}x",
+                ratio_u64(
+                    run.analysis_stats.lines_evaluated,
+                    doubled_run.analysis_stats.lines_evaluated
+                ),
+                time_ratio
+            );
+        }
+
         println!(
-            "[xtask] BENCH GATES OK — scenario={} files={} lines={} findings={} rule_evals={} factories={}",
+            "[xtask] BENCH GATES OK — scenario={} files={} lines={} findings={} rule_evals={} factories={}{}",
             manifest.scenario,
             manifest.files,
             manifest.total_lines,
             run.findings,
             run.analysis_stats.rule_evaluations,
-            run.analysis_stats.rule_factory_invocations
+            run.analysis_stats.rule_factory_invocations,
+            scaling_note
         );
         return Ok(());
     }
 
-    let mut runs: Vec<RunReport> = Vec::with_capacity(options.runs);
-    for run_index in 0..options.runs {
-        runs.push(run_once(run_index, &request, &enabled, &budget, false)?);
-    }
-    let summary = summarize(&runs);
+    // §5: una regresión debe ser SOSTENIDA antes de bloquear; con `--baseline`
+    // se re-corre automáticamente (default: 1 reintento) para descartar ruido.
+    let mut attempt = 0usize;
+    let report = loop {
+        attempt += 1;
+        let mut runs: Vec<RunReport> = Vec::with_capacity(options.runs);
+        for run_index in 0..options.runs {
+            runs.push(run_once(run_index, &request, &enabled, &budget, false)?);
+        }
+        let summary = summarize(&runs);
+        let mut report = BenchReport {
+            schema: "gx-bench/2",
+            generated_at: timestamp(),
+            profile: if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+            engine_version: env!("CARGO_PKG_VERSION"),
+            rustc_version: rustc_version(),
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            corpus: manifest.clone(),
+            profile_rules: enabled.clone(),
+            runs,
+            summary,
+            baseline_comparison: None,
+        };
 
-    let report = BenchReport {
-        schema: "gx-bench/2",
-        generated_at: timestamp(),
-        profile: if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        },
-        engine_version: env!("CARGO_PKG_VERSION"),
-        rustc_version: rustc_version(),
-        os: std::env::consts::OS,
-        arch: std::env::consts::ARCH,
-        corpus: manifest,
-        profile_rules: enabled,
-        runs,
-        summary,
+        let Some(baseline_path) = options.baseline.as_deref() else {
+            break report;
+        };
+        let comparison = compare_baseline(
+            &report,
+            baseline_path,
+            options.max_regression_pct,
+            options.max_memory_regression_pct,
+        )?;
+        let passed = comparison.passed;
+        report.baseline_comparison = Some(comparison);
+        if passed || attempt > options.baseline_retries {
+            break report;
+        }
+        eprintln!(
+            "[xtask] baseline no pasó en el intento {attempt}: \
+             re-corriendo para descartar ruido de timing (intento {})",
+            attempt + 1
+        );
     };
 
     let json = serde_json::to_string_pretty(&report)?;
-    match options.out {
+    match &options.out {
         Some(path) => {
-            std::fs::write(&path, format!("{json}\n"))
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("no se pudo crear '{}'", parent.display()))?;
+            }
+            std::fs::write(path, format!("{json}\n"))
                 .with_context(|| format!("no se pudo escribir '{}'", path.display()))?;
             eprintln!("[xtask] resultados: {}", path.display());
         }
         None => println!("{json}"),
+    }
+
+    // §5 (envelope): el reporte ya está escrito; el techo es un gate.
+    if let Some(max_mib) = options.max_peak_mib {
+        if let Some(worst) = report
+            .runs
+            .iter()
+            .filter_map(|run| run.peak_working_set_bytes)
+            .max()
+        {
+            let limit = max_mib * 1024 * 1024;
+            if worst > limit {
+                bail!(
+                    "peak working set {} MiB > límite {max_mib} MiB (presupuesto de análisis)",
+                    worst / (1024 * 1024)
+                );
+            }
+        }
+    }
+
+    if let Some(comparison) = &report.baseline_comparison {
+        if comparison.passed {
+            eprintln!(
+                "[xtask] BASELINE OK vs '{}': mediana {:+.2}% (umbral {:.2}%), \
+                 peak working set {} (umbral {:.2}%)",
+                comparison.baseline,
+                comparison.median_delta_pct,
+                comparison.max_regression_pct,
+                comparison
+                    .peak_delta_pct
+                    .map(|d| format!("{d:+.2}%"))
+                    .unwrap_or_else(|| "sin dato".to_string()),
+                comparison.max_memory_regression_pct
+            );
+            for note in &comparison.notes {
+                eprintln!("[xtask] baseline nota: {note}");
+            }
+        } else {
+            bail!(
+                "REGRESIÓN de performance vs '{}': {}",
+                comparison.baseline,
+                comparison.regressions.join("; ")
+            );
+        }
     }
     Ok(())
 }
@@ -398,6 +529,34 @@ fn parse_bench_args(args: &[String]) -> Result<BenchArgs> {
                     args.get(i).context("--out requiere una ruta")?,
                 ));
             }
+            "--baseline" => {
+                i += 1;
+                options.baseline = Some(PathBuf::from(
+                    args.get(i).context("--baseline requiere una ruta")?,
+                ));
+            }
+            "--baseline-retries" => {
+                i += 1;
+                options.baseline_retries = parse_usize(args.get(i), "--baseline-retries")?;
+            }
+            "--max-regression-pct" => {
+                i += 1;
+                options.max_regression_pct = parse_f64(args.get(i), "--max-regression-pct")?;
+            }
+            "--max-memory-regression-pct" => {
+                i += 1;
+                options.max_memory_regression_pct =
+                    parse_f64(args.get(i), "--max-memory-regression-pct")?;
+            }
+            "--scaling" => options.scaling = true,
+            "--max-peak-mib" => {
+                i += 1;
+                options.max_peak_mib = Some(
+                    parse_usize(args.get(i), "--max-peak-mib")?
+                        .try_into()
+                        .context("--max-peak-mib fuera de rango")?,
+                );
+            }
             other => bail!("argumento de bench desconocido: '{other}'"),
         }
         i += 1;
@@ -405,8 +564,22 @@ fn parse_bench_args(args: &[String]) -> Result<BenchArgs> {
     if options.files == 0 || options.lines == 0 || options.objects == 0 || options.runs == 0 {
         bail!("--files, --lines, --objects y --runs deben ser > 0");
     }
+    if options.max_regression_pct < 0.0 || options.max_memory_regression_pct < 0.0 {
+        bail!("los umbrales de regresión deben ser >= 0");
+    }
     if options.check {
+        if options.baseline.is_some() {
+            bail!("--check (operation-counts) y --baseline (timing) son gates distintos: usá uno");
+        }
         options.runs = 1;
+    }
+    if options.scaling {
+        if !options.check {
+            bail!("--scaling es un gate determinista: requiere --check");
+        }
+        if options.scenario == Scenario::Real {
+            bail!("--scaling no aplica al corpus real (tamaño fijo)");
+        }
     }
     Ok(options)
 }
@@ -416,6 +589,17 @@ fn parse_usize(value: Option<&String>, flag: &str) -> Result<usize> {
         .with_context(|| format!("{flag} requiere un valor"))?
         .parse()
         .with_context(|| format!("valor inválido para {flag}"))
+}
+
+fn parse_f64(value: Option<&String>, flag: &str) -> Result<f64> {
+    let parsed: f64 = value
+        .with_context(|| format!("{flag} requiere un valor"))?
+        .parse()
+        .with_context(|| format!("valor inválido para {flag}"))?;
+    if !parsed.is_finite() {
+        bail!("{flag} debe ser un número finito");
+    }
+    Ok(parsed)
 }
 
 /// Corpus fijo (A02.4): mismo contenido y hash en cada corrida.
@@ -681,6 +865,253 @@ struct BenchReport {
     profile_rules: Vec<String>,
     runs: Vec<RunReport>,
     summary: Summary,
+    /// E01: resultado del gate `--baseline` (None sin baseline).
+    baseline_comparison: Option<BaselineComparison>,
+}
+
+/// Vista mínima de un reporte `gx-bench/2` previo (E01). Sólo se deserializan
+/// los campos del gate; el resto se ignora.
+#[derive(Debug, Clone, Deserialize)]
+struct BaselineReport {
+    schema: String,
+    #[serde(default)]
+    generated_at: String,
+    profile: String,
+    rustc_version: String,
+    #[serde(default)]
+    os: String,
+    #[serde(default)]
+    arch: String,
+    corpus: BaselineCorpus,
+    profile_rules: Vec<String>,
+    summary: BaselineSummary,
+    #[serde(default)]
+    runs: Vec<BaselineRun>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BaselineCorpus {
+    scenario: String,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BaselineSummary {
+    #[serde(default)]
+    runs: usize,
+    median_ms: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BaselineRun {
+    #[serde(default)]
+    peak_working_set_bytes: Option<u64>,
+}
+
+/// E01: resultado de comparar la corrida actual contra un baseline capturado
+/// en un runner consistente. Se serializa dentro del reporte (`--out`).
+#[derive(Debug, Clone, Serialize)]
+struct BaselineComparison {
+    baseline: String,
+    baseline_generated_at: String,
+    baseline_rustc_version: String,
+    corpus_sha256: String,
+    baseline_runs: usize,
+    current_runs: usize,
+    baseline_median_ms: f64,
+    current_median_ms: f64,
+    /// Diferencia porcentual de mediana (positiva = más lento = menos throughput).
+    median_delta_pct: f64,
+    max_regression_pct: f64,
+    baseline_peak_working_set_bytes: Option<u64>,
+    current_peak_working_set_bytes: Option<u64>,
+    peak_delta_pct: Option<f64>,
+    max_memory_regression_pct: f64,
+    /// `false` = regresión: el proceso termina con exit code != 0.
+    passed: bool,
+    regressions: Vec<String>,
+    /// Advertencias de comparabilidad (no bloquean).
+    notes: Vec<String>,
+}
+
+/// Compara el reporte actual contra un baseline `gx-bench/2`.
+///
+/// Fallas estructurales (schema/corpus/reglas/toolchain distintos, <5 corridas)
+/// abortan: una comparación entre corridas no equivalentes no es evidencia.
+/// Una regresión de mediana/throughput o de peak working set marca
+/// `passed = false` para que el caller conserve el reporte y salga con error.
+fn compare_baseline(
+    report: &BenchReport,
+    baseline_path: &Path,
+    max_regression_pct: f64,
+    max_memory_regression_pct: f64,
+) -> Result<BaselineComparison> {
+    let raw = std::fs::read_to_string(baseline_path)
+        .with_context(|| format!("no se pudo leer el baseline '{}'", baseline_path.display()))?;
+    let baseline: BaselineReport = serde_json::from_str(&raw)
+        .with_context(|| format!("baseline inválido '{}'", baseline_path.display()))?;
+
+    if baseline.schema != report.schema {
+        bail!(
+            "el baseline usa schema '{}' y la corrida '{}': regenerá el baseline",
+            baseline.schema,
+            report.schema
+        );
+    }
+    if baseline.profile != report.profile {
+        bail!(
+            "el baseline es perfil '{}' y la corrida '{}': no son comparables",
+            baseline.profile,
+            report.profile
+        );
+    }
+    if baseline.corpus.scenario != report.corpus.scenario
+        || !baseline
+            .corpus
+            .sha256
+            .eq_ignore_ascii_case(&report.corpus.sha256)
+    {
+        bail!(
+            "corpus distinto: baseline '{}/{}' vs corrida '{}/{}' (mismo escenario y SHA-256)",
+            baseline.corpus.scenario,
+            baseline.corpus.sha256,
+            report.corpus.scenario,
+            report.corpus.sha256
+        );
+    }
+    if baseline.profile_rules != report.profile_rules {
+        bail!(
+            "set de reglas distinto (baseline {} vs corrida {} reglas): usá el mismo perfil",
+            baseline.profile_rules.len(),
+            report.profile_rules.len()
+        );
+    }
+    if !baseline.os.is_empty() && baseline.os != report.os {
+        bail!(
+            "sistema distinto: baseline '{}' vs corrida '{}'",
+            baseline.os,
+            report.os
+        );
+    }
+    if !baseline.arch.is_empty() && baseline.arch != report.arch {
+        bail!(
+            "arquitectura distinta: baseline '{}' vs corrida '{}'",
+            baseline.arch,
+            report.arch
+        );
+    }
+
+    let mut notes: Vec<String> = Vec::new();
+    if baseline.rustc_version != report.rustc_version {
+        if baseline.rustc_version == UNKNOWN_COMPILER || report.rustc_version == UNKNOWN_COMPILER {
+            notes.push(format!(
+                "compilador desconocido en uno de los reportes ('{}' vs '{}')",
+                baseline.rustc_version, report.rustc_version
+            ));
+        } else {
+            bail!(
+                "compilador distinto: baseline '{}' vs corrida '{}': el toolchain afecta el timing",
+                baseline.rustc_version,
+                report.rustc_version
+            );
+        }
+    }
+    if baseline.summary.runs < MIN_COMPARISON_RUNS || report.summary.runs < MIN_COMPARISON_RUNS {
+        bail!(
+            "se requieren >= {MIN_COMPARISON_RUNS} corridas repetidas (baseline {}, actual {}): \
+             usá `--runs {MIN_COMPARISON_RUNS}`",
+            baseline.summary.runs,
+            report.summary.runs
+        );
+    }
+
+    let baseline_peak = baseline
+        .runs
+        .iter()
+        .filter_map(|run| run.peak_working_set_bytes)
+        .max();
+    let current_peak = report
+        .runs
+        .iter()
+        .filter_map(|run| run.peak_working_set_bytes)
+        .max();
+    if baseline_peak.is_none() || current_peak.is_none() {
+        notes.push("peak working set no disponible en uno de los reportes".to_string());
+    }
+
+    let (passed, regressions, peak_delta_pct) = evaluate_regression(
+        baseline.summary.median_ms,
+        report.summary.median_ms,
+        baseline_peak,
+        current_peak,
+        max_regression_pct,
+        max_memory_regression_pct,
+    );
+
+    Ok(BaselineComparison {
+        baseline: baseline_path.display().to_string(),
+        baseline_generated_at: baseline.generated_at,
+        baseline_rustc_version: baseline.rustc_version,
+        corpus_sha256: report.corpus.sha256.clone(),
+        baseline_runs: baseline.summary.runs,
+        current_runs: report.summary.runs,
+        baseline_median_ms: baseline.summary.median_ms,
+        current_median_ms: report.summary.median_ms,
+        median_delta_pct: if baseline.summary.median_ms > 0.0 {
+            (report.summary.median_ms - baseline.summary.median_ms) / baseline.summary.median_ms
+                * 100.0
+        } else {
+            0.0
+        },
+        max_regression_pct,
+        baseline_peak_working_set_bytes: baseline_peak,
+        current_peak_working_set_bytes: current_peak,
+        peak_delta_pct,
+        max_memory_regression_pct,
+        passed,
+        regressions,
+        notes,
+    })
+}
+
+const MIN_COMPARISON_RUNS: usize = 5;
+const UNKNOWN_COMPILER: &str = "desconocido";
+
+/// Decisión pura del gate (§5): mediana/throughput y peak working set.
+fn evaluate_regression(
+    baseline_median_ms: f64,
+    current_median_ms: f64,
+    baseline_peak: Option<u64>,
+    current_peak: Option<u64>,
+    max_regression_pct: f64,
+    max_memory_regression_pct: f64,
+) -> (bool, Vec<String>, Option<f64>) {
+    let mut regressions: Vec<String> = Vec::new();
+    if baseline_median_ms > 0.0 {
+        let delta = (current_median_ms - baseline_median_ms) / baseline_median_ms * 100.0;
+        if delta > max_regression_pct {
+            regressions.push(format!(
+                "mediana/throughput {delta:+.2}% > umbral {max_regression_pct:.2}%"
+            ));
+        }
+    } else {
+        regressions.push("baseline con mediana inválida (0 ms)".to_string());
+    }
+
+    let peak_delta_pct = match (baseline_peak, current_peak) {
+        (Some(baseline), Some(current)) if baseline > 0 => {
+            let delta = (current as f64 - baseline as f64) / baseline as f64 * 100.0;
+            if delta > max_memory_regression_pct {
+                regressions.push(format!(
+                    "peak working set {delta:+.2}% > umbral {max_memory_regression_pct:.2}%"
+                ));
+            }
+            Some(delta)
+        }
+        _ => None,
+    };
+
+    (regressions.is_empty(), regressions, peak_delta_pct)
 }
 
 fn run_once(
@@ -881,6 +1312,81 @@ fn check_gates(manifest: &CorpusManifest, run: &RunReport, rule_count: usize) ->
     Ok(())
 }
 
+/// §5 (envelope): techo opcional de peak working set del proceso (MiB).
+fn check_peak(run: &RunReport, max_peak_mib: Option<u64>) -> Result<()> {
+    let Some(max_mib) = max_peak_mib else {
+        return Ok(());
+    };
+    let Some(peak) = run.peak_working_set_bytes else {
+        return Ok(());
+    };
+    let limit = max_mib * 1024 * 1024;
+    if peak > limit {
+        bail!(
+            "peak working set {} MiB > límite {max_mib} MiB (presupuesto de análisis)",
+            peak / (1024 * 1024)
+        );
+    }
+    Ok(())
+}
+
+fn ratio_u64(base: u64, doubled: u64) -> f64 {
+    if base == 0 {
+        return if doubled == 0 { 1.0 } else { f64::INFINITY };
+    }
+    doubled as f64 / base as f64
+}
+
+/// §5 (linealidad): con el corpus al doble, los contadores DETERMINISTAS
+/// deben quedar cerca de 2x (investigar fuera de [1.7, 2.3]). Devuelve la
+/// razón de tiempo medida (informativa).
+fn check_scaling(base: &RunReport, doubled: &RunReport) -> Result<f64> {
+    let pairs: [(&str, u64, u64); 5] = [
+        (
+            "lines",
+            base.analysis_stats.lines_evaluated,
+            doubled.analysis_stats.lines_evaluated,
+        ),
+        (
+            "objects",
+            base.analysis_stats.objects_extracted,
+            doubled.analysis_stats.objects_extracted,
+        ),
+        (
+            "parser_invocations",
+            base.analysis_stats.parser_invocations,
+            doubled.analysis_stats.parser_invocations,
+        ),
+        (
+            "rule_evaluations",
+            base.analysis_stats.rule_evaluations,
+            doubled.analysis_stats.rule_evaluations,
+        ),
+        (
+            "findings",
+            base.analysis_stats.findings_emitted,
+            doubled.analysis_stats.findings_emitted,
+        ),
+    ];
+    for (name, base_value, doubled_value) in pairs {
+        if base_value == 0 && doubled_value == 0 {
+            continue;
+        }
+        let ratio = ratio_u64(base_value, doubled_value);
+        if !(1.7..=2.3).contains(&ratio) {
+            bail!(
+                "escalado no lineal en {name}: {base_value} -> {doubled_value} \
+                 ({ratio:.2}x; esperado ~2x, alarma >2.3x)"
+            );
+        }
+    }
+    Ok(if base.full_analysis_ms > 0.0 {
+        doubled.full_analysis_ms / base.full_analysis_ms
+    } else {
+        1.0
+    })
+}
+
 fn summarize(runs: &[RunReport]) -> Summary {
     let mut times: Vec<f64> = runs.iter().map(|r| r.full_analysis_ms).collect();
     times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -1023,4 +1529,66 @@ fn peak_working_set_bytes() -> Option<u64> {
 #[cfg(not(windows))]
 fn peak_working_set_bytes() -> Option<u64> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regression_within_thresholds_passes() {
+        let (passed, regressions, peak) =
+            evaluate_regression(100.0, 109.9, Some(1000), Some(1149), 10.0, 15.0);
+        assert!(passed, "{regressions:?}");
+        assert!(regressions.is_empty());
+        assert!((peak.unwrap() - 14.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn median_regression_fails() {
+        let (passed, regressions, _) =
+            evaluate_regression(100.0, 110.1, Some(1000), Some(1000), 10.0, 15.0);
+        assert!(!passed);
+        assert_eq!(regressions.len(), 1);
+        assert!(regressions[0].contains("mediana/throughput"));
+    }
+
+    #[test]
+    fn memory_regression_fails() {
+        let (passed, regressions, _) =
+            evaluate_regression(100.0, 100.0, Some(1000), Some(1151), 10.0, 15.0);
+        assert!(!passed);
+        assert_eq!(regressions.len(), 1);
+        assert!(regressions[0].contains("peak working set"));
+    }
+
+    #[test]
+    fn missing_peak_is_not_a_regression() {
+        let (passed, regressions, peak) = evaluate_regression(100.0, 105.0, None, None, 10.0, 15.0);
+        assert!(passed, "{regressions:?}");
+        assert_eq!(peak, None);
+    }
+
+    #[test]
+    fn invalid_baseline_median_fails() {
+        let (passed, regressions, _) =
+            evaluate_regression(0.0, 10.0, Some(1000), Some(1000), 10.0, 15.0);
+        assert!(!passed);
+        assert!(regressions[0].contains("mediana inválida"));
+    }
+
+    #[test]
+    fn scenario_parse_roundtrip() {
+        for name in [
+            "small-files",
+            "diagnostic-heavy",
+            "clean",
+            "long-lines",
+            "wide-xml",
+            "real",
+        ] {
+            assert_eq!(Scenario::parse(name).unwrap().name(), name);
+        }
+        assert!(Scenario::parse("nope").is_err());
+    }
 }

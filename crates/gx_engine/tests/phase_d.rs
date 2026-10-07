@@ -27,6 +27,7 @@ fn request(inputs: Vec<PathBuf>, rules: &[&str], pct: f32) -> AnalysisRequest {
         policy: QgPolicy::Percentage { max_error_pct: pct },
         record_history: false,
         retain_sensitive_evidence: false,
+        discovery: Default::default(),
     }
 }
 

@@ -75,7 +75,9 @@ fn verdict_label(verdict: QgVerdict) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AnalysisRequest, AuditMetrics, Issue, QgVerdict, Severity};
+    use crate::models::{
+        AnalysisRequest, AuditMetrics, DiscoveryPolicy, Issue, QgVerdict, Severity,
+    };
     use std::path::PathBuf;
 
     fn sample_result() -> AnalysisResult {
@@ -89,6 +91,7 @@ mod tests {
             },
             record_history: false,
             retain_sensitive_evidence: false,
+            discovery: DiscoveryPolicy::default(),
         };
         AnalysisResult {
             schema_version: 1,

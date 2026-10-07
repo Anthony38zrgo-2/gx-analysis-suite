@@ -14,6 +14,9 @@ Este repositorio (`gx-linter-rs`) es el **port 1:1** de
 **Backlog activo:** `plan/backlog-engine-cli-tauri.json` (M0→M3 con gates).
 **Estado: M0–M3 completados (20/20 historias) — GATE-BASELINE,
 GATE-ENGINE, GATE-CLI y GATE-DESKTOP en verde (2026-10-02).**
+**Roadmap performance/modularidad/seguridad (fases A–E): cerrado
+(2026-10-06); logs y evidencia medida en
+`plan/performance-modularity-security-roadmap.md` §8–§18.**
 
 | EPIC | Tema | Estado |
 |------|------|--------|
@@ -21,14 +24,18 @@ GATE-ENGINE, GATE-CLI y GATE-DESKTOP en verde (2026-10-02).**
 | 01 | Workspace Cargo + toolchain + CI | ✅ Hecho |
 | 02 | Dominio core (models, ParsedLine, regex_cache) | ✅ Hecho |
 | M0 | GX-001/002: fixture reproducible + harness engine/reglas | ✅ Hecho |
-| 03 | SQLite storage (rusqlite) + DAOs | ⏳ Siguiente (GX-009: catálogo/seeding confiable) |
-| 04 | Filesystem + XPZ extractor | Pendiente (GX-006/007) |
-| 05 | Trait Rule + registry + runtime/dispatch | Pendiente (GX-003/004/005) |
-| 06 | Catálogo 30 reglas | Parcial (24 concretas + audit GX-008) |
+| 03 | SQLite storage (rusqlite) + DAOs | ✅ Hecho (GX-009..011; migraciones V001–V006) |
+| 04 | Filesystem + XPZ extractor | ✅ Hecho (GX-006/007; hoy en `gx_sources`) |
+| 05 | Trait Rule + registry + runtime/dispatch | ✅ Hecho (GX-003/004/005) |
+| 06 | Catálogo de reglas | ✅ Hecho (34: 28 concretas + 6 abstractas) |
 | 07 | Reporte PDF | ✅ Hecho (GX-019: printpdf, CLI + desktop) |
 | 08 | CLI (clap) | ✅ Hecho (GX-012/013/014) |
 | 09 | GUI → reemplazada por **Tauri 2** | ✅ Hecho (GX-015..018) |
 | 10 | QA/paridad, migración datos, empaquetado | ✅ Hecho (NSIS + CI desktop) |
+
+> Las secciones **M0–M3** siguientes son el registro histórico de su fecha
+> (conteos, comandos y migraciones de entonces); el estado vigente es el de
+> esta cabecera y el "Estado final" al pie.
 
 ---
 
@@ -418,34 +425,29 @@ Validación con los exports reales de `examples/` (4 archivos):
 
 ---
 
-### Lo ya construido en `gx-linter-rs`
-- Workspace Cargo con 6 crates + `xtask`, `rust-toolchain.toml`, `.cargo/config.toml`.
-- CI GitHub Actions (fmt/clippy/test/audit/build-release).
-- `gx_core`:
-  - `models.rs`: `SourceLine`, `Issue`, `Severity` (serde `UPPERCASE`), `AuditMetrics` (+`from_issues`), `AuditContext`, `ParsedLine` (+`from_source`, getters legacy).
-  - `regex_cache.rs`: todos los patrones centralizados como `LazyLock` (incl. `STRING_COMMENT_PATTERN` fiel al origen `"[^"]*"|'[^']*'|//.*$|/\*.*?\*/`), y `has_logical_operator` que emula el lookbehind `(?<!&)` ausente en Rust.
-- `tests/fixtures/`:
-  - `golden_snapshot_cli.txt` — salida CLI real (15 reglas cargadas, 17 hallazgos: 12 errores / 5 warnings).
-  - `golden_issues.json` — 17 hallazgos con `rule_id/line/severity/description/line_content`.
-  - `rule_manifest.json` — las 30 reglas (24 concretas + 6 abstractas).
-- `scripts/gen_baseline.py` — regenera los fixtures desde el engine Python.
+## Estado final (2026-10-06)
 
-### ⚠️ Corrección respecto al backlog
-El backlog estimaba **14 WARNING / 10 ERROR**. El `rule_manifest.json` real
-(extraído del código fuente) dice **18 WARNING / 12 ERROR**. El manifest es
-la fuente de verdad para el port; el Rust debe coincidir con el conteo real,
-no con la estimación del backlog.
-
-### Decisiones tomadas
-- **Ubicación:** repo git **separado** hermano del Python (no subcarpeta).
-- **Dependencias pesadas** (`eframe`/`egui`/`rfd`, `printpdf`/`lopdf`) se
-  añaden en EPIC-07/09 para mantener el build rápido en las fases tempranas.
-- `LazyLock` se usa desde `std::sync` (once_cell 1.19 no lo exporta); `std` es
-  estable desde 1.80 y el toolchain es 1.95.
+- **M0–M3 completos** (20/20 historias del backlog activo; GATE-BASELINE,
+  GATE-ENGINE, GATE-CLI y GATE-DESKTOP en verde).
+- **Roadmap performance/modularidad/seguridad (fases A–E) cerrado**:
+  presupuesto de ejecución con límites run-wide calibrados, discovery
+  explícito (globs/ignore/symlinks), persistencia acotada con snapshot
+  completo del historial, packs semánticos/seguridad, contratos generados y
+  gates de evidencia (operation-counts, escalado ~2x, envelope 512 MiB,
+  latencia IPC p95). Logs y números medidos:
+  `plan/performance-modularity-security-roadmap.md` §8–§18.
+- **Pendientes externos (no de código):** baseline de timing en el runner
+  self-hosted `gx-benchmark` (`.github/workflows/bench-consistent.yml`) y
+  captura interactiva de latencias WebView2 (el boundary IPC ya está gateado
+  en `desktop/src-tauri/tests/latency.rs`).
+- **Documentación alineada:** README actualizado (MSRV 1.89/1.90, flags de
+  discovery, NDJSON, perfiles de reglas, comandos desktop con scope,
+  migraciones V001→V006 y 34 reglas).
 
 ---
 
-## Cómo regenerar el baseline (EPIC-00)
+## Cómo regenerar el baseline (EPIC-00, histórico)
+
 ```powershell
 cd genexus-linter-python
 python -m venv .venv
@@ -460,17 +462,7 @@ commiteados salvo que cambie el origen.
 
 ---
 
-## Siguiente hito: EPIC-03 (SQLite)
-- `gx_storage::db` — `get_db_path` (`%APPDATA%/GX/Linter/gx_linter.db`, fallback
-  `./data/`), `init_db` con `rusqlite_migration` (migrations `V001`/`V002`
-  literales del backlog), `get_pool` (r2d2).
-- DAOs: `rules_dao` (incl. `is_rule_enabled` con default-disabled
-  `{GX.1.1, GX.1.2, GX.1.3.1, GX.1.4.1, GX.1.4.2, GX.1.6.1, GX.1.6.2, GX.1.7.1}`),
-  `settings_dao` (`qg_threshold_pct` default 10.0), `audit_dao`.
-- `seed::import_reglas_csv` (UPSERT desde `Reglas.csv` con tabla de triggers del backlog).
-- Tests: `init_db` crea 4 tablas + view + triggers; `SELECT count(*) FROM rules >= 30`.
-
-## Notas de paridad (recordatorio del backlog)
+## Notas de paridad (histórico)
 - **Quality Gate DUAL**: CLI = umbrales absolutos
   (`errors<=max_errors AND warnings<=max_warnings`, `main.py:96-99`);
   GUI = porcentual (`error_pct = errors*100/total <= qg_threshold_pct`,

@@ -15,7 +15,9 @@ use gx_core::models::{
 use gx_core::semantics::{FactSet, GLOBAL_FACT_CACHE};
 use gx_core::validation::{validate_request_shape, ValidationError};
 use gx_rules::base::{ObjectFacts, ProjectFacts, Rule, RuleDescriptor};
-use gx_sources::filesystem::{discover_source_files_with_cancel, is_source_extension};
+use gx_sources::filesystem::{
+    discover_source_files_with_policy, is_source_extension, validate_discovery, DiscoveryOptions,
+};
 
 use crate::dispatch::{collect_candidate_rules_into, plan_dispatch_descriptors, DispatchPlan};
 
@@ -66,6 +68,15 @@ pub struct FileRunOutcome {
 
 /// Checkpoint de cancelación/presupuesto cada N líneas (A04).
 const LINE_CHECKPOINT: usize = 512;
+
+/// §5 (envelope): tamaño FIJO del chunk de archivos evaluado en paralelo.
+///
+/// Fijo (no derivado de los cores) para que el corte por el presupuesto
+/// global de findings ocurra en el mismo borde de chunk en cualquier máquina
+/// y el subconjunto retenido sea determinista. Dentro del chunk, cada archivo
+/// recibe una cuota de findings (`restante / chunk`) para que un corpus de
+/// archivos densos no retenga más allá del presupuesto de corrida.
+const FILE_EVAL_CHUNK: usize = 8;
 
 /// Resultado de evaluar UN objeto (B03/D01).
 struct ObjectRun {
@@ -576,6 +587,12 @@ pub fn analyze_with_options(
     if let Err(e) = validate_request(request) {
         return invalid_result(request, e.message);
     }
+    // A01.5: la política de discovery se compila una vez por corrida (globs
+    // validados + ignore_file leído); un fallo aquí no puede producir PASS.
+    let discovery_options = match DiscoveryOptions::compile(&request.discovery) {
+        Ok(options) => options,
+        Err(message) => return invalid_result(request, message),
+    };
 
     let enabled: HashSet<String> = request.enabled_rule_ids.iter().cloned().collect();
     let mut inputs: Vec<PathBuf> = Vec::new();
@@ -602,7 +619,7 @@ pub fn analyze_with_options(
             }
             push_unique(input.clone(), &mut inputs, &mut seen, &mut coverage);
         } else if input.is_dir() {
-            let report = discover_source_files_with_cancel(input, cancel);
+            let report = discover_source_files_with_policy(input, &discovery_options, cancel);
             coverage.files_excluded += report.excluded_files;
             if report.cancelled {
                 discovery_cancelled = true;
@@ -680,54 +697,86 @@ pub fn analyze_with_options(
         Err(error) => return invalid_result(request, error.to_string()),
     };
 
-    let outcomes = evaluate_files_parallel_with_ctx(
-        &inputs,
-        &plan,
-        |path| AuditContext {
-            project_path: path.to_path_buf(),
-            rules_path: path.to_path_buf(),
-            max_errors,
-            max_warnings,
-            qg_threshold_pct,
-            extra_settings: extra_settings.clone(),
-        },
-        on_progress,
-        cancel,
-        budget,
-    );
+    let ctx_factory = |path: &Path| AuditContext {
+        project_path: path.to_path_buf(),
+        rules_path: path.to_path_buf(),
+        max_errors,
+        max_warnings,
+        qg_threshold_pct,
+        extra_settings: extra_settings.clone(),
+    };
 
     let mut findings: Vec<Issue> = Vec::new();
     let mut scanned_files: usize = 0;
     let mut any_cancelled = false;
     let mut any_limit = false;
     let mut pack_coverage: Vec<PackCoverage> = Vec::new();
-    for outcome in outcomes {
-        if outcome.cancelled {
-            any_cancelled = true;
+
+    // §5 (envelope): el presupuesto de findings es de CORRIDA, no sólo por
+    // archivo. Los inputs se evalúan en chunks ORDENADOS de tamaño fijo
+    // (paralelismo dentro del chunk); el corte por límite ocurre en un borde
+    // de chunk, así que el subconjunto retenido es determinista y la memoria
+    // transitoria queda acotada (chunk × findings por archivo + retenidos).
+    for chunk in inputs.chunks(FILE_EVAL_CHUNK) {
+        // Cuota determinista por archivo dentro del chunk: acota la memoria
+        // transitoria y garantiza que el total retenido no exceda el
+        // presupuesto de la corrida.
+        let remaining = budget.max_findings.saturating_sub(findings.len());
+        let mut chunk_budget = budget.clone();
+        chunk_budget.max_findings = (remaining / chunk.len()).max(1);
+        let outcomes = evaluate_files_parallel_with_ctx(
+            chunk,
+            &plan,
+            ctx_factory,
+            on_progress,
+            cancel,
+            &chunk_budget,
+        );
+        let mut global_limit_hit = false;
+        for outcome in outcomes {
+            if outcome.cancelled {
+                any_cancelled = true;
+                findings.extend(outcome.issues);
+                merge_pack_coverage(&mut pack_coverage, outcome.pack_coverage);
+                failures.push(ScanFailure {
+                    path: outcome.path,
+                    error: CANCELLED_MESSAGE.to_string(),
+                });
+                continue;
+            }
+            if let Some(error) = outcome.error {
+                failures.push(ScanFailure {
+                    path: outcome.path,
+                    error,
+                });
+                continue;
+            }
+            scanned_files += 1;
             findings.extend(outcome.issues);
             merge_pack_coverage(&mut pack_coverage, outcome.pack_coverage);
-            failures.push(ScanFailure {
-                path: outcome.path,
-                error: CANCELLED_MESSAGE.to_string(),
-            });
-            continue;
+            if let Some(limit) = outcome.limit {
+                any_limit = true;
+                failures.push(ScanFailure {
+                    path: outcome.path,
+                    error: format!("presupuesto agotado: {limit}"),
+                });
+            }
+            // A04: corte global de la corrida en orden de input (determinista).
+            if findings.len() >= budget.max_findings {
+                any_limit = true;
+                global_limit_hit = true;
+                failures.push(ScanFailure {
+                    path: PathBuf::from("<corrida>"),
+                    error: format!(
+                        "límite de hallazgos retenidos de la corrida alcanzado ({})",
+                        budget.max_findings
+                    ),
+                });
+                break;
+            }
         }
-        if let Some(error) = outcome.error {
-            failures.push(ScanFailure {
-                path: outcome.path,
-                error,
-            });
-            continue;
-        }
-        scanned_files += 1;
-        findings.extend(outcome.issues);
-        merge_pack_coverage(&mut pack_coverage, outcome.pack_coverage);
-        if let Some(limit) = outcome.limit {
-            any_limit = true;
-            failures.push(ScanFailure {
-                path: outcome.path,
-                error: format!("presupuesto agotado: {limit}"),
-            });
+        if any_cancelled || global_limit_hit {
+            break;
         }
     }
     // D04: perfil profundo project-wide (opt-in). Sus límites son propios y
@@ -867,6 +916,11 @@ pub fn validate_request(request: &AnalysisRequest) -> Result<(), ValidationError
                 unknown.join(", ")
             ),
         ));
+    }
+    // A01.5: la política de discovery (globs + ignore_file) también es parte
+    // de la frontera común: un patrón inválido falla antes de leer fuentes.
+    if let Err(message) = validate_discovery(&request.discovery) {
+        return Err(ValidationError::new("invalid_discovery", message));
     }
     Ok(())
 }

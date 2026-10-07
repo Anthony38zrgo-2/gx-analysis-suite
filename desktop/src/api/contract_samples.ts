@@ -11,6 +11,17 @@ import type {
 } from "./types";
 
 export const requestSample: AnalysisRequest = {
+  "discovery": {
+    "exclude": [
+      "generated/**"
+    ],
+    "follow_symlinks": true,
+    "ignore_file": "gx.ignore",
+    "include": [
+      "**/*.xml"
+    ],
+    "include_hidden": true
+  },
   "enabled_rule_ids": [
     "GX.1.1",
     "GX.2.5"
@@ -106,6 +117,17 @@ export const resultSample: AnalysisResult = {
     "max_error_pct": 10.0
   },
   "request": {
+    "discovery": {
+      "exclude": [
+        "generated/**"
+      ],
+      "follow_symlinks": true,
+      "ignore_file": "gx.ignore",
+      "include": [
+        "**/*.xml"
+      ],
+      "include_hidden": true
+    },
     "enabled_rule_ids": [
       "GX.1.1",
       "GX.2.5"
@@ -165,6 +187,17 @@ export const summarySample: ScanSummary = {
     "max_error_pct": 10.0
   },
   "request": {
+    "discovery": {
+      "exclude": [
+        "generated/**"
+      ],
+      "follow_symlinks": true,
+      "ignore_file": "gx.ignore",
+      "include": [
+        "**/*.xml"
+      ],
+      "include_hidden": true
+    },
     "enabled_rule_ids": [
       "GX.1.1",
       "GX.2.5"

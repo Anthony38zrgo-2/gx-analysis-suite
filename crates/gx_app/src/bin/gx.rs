@@ -34,6 +34,10 @@ struct Cli {
     command: Commands,
 }
 
+// A01.5: la variante `Scan` es rica (paths, globs de discovery, política);
+// `Rules`/`ExportPdf` son órdenes administrativos. El boxing no aplica al
+// derive de clap, así que la diferencia de tamaño se permite explícitamente.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Escanea un archivo o directorio GeneXus y evalúa el quality gate.
@@ -62,6 +66,23 @@ enum Commands {
         /// Reglas a deshabilitar sobre el set por defecto.
         #[arg(long, value_delimiter = ',', value_name = "IDS")]
         disable: Vec<String>,
+        /// A01.5: globs de inclusión del discovery (relativos al root;
+        /// vacío = todos los archivos fuente).
+        #[arg(long, value_delimiter = ',', value_name = "GLOB")]
+        include: Vec<String>,
+        /// A01.5: globs de exclusión del discovery (dominan sobre --include).
+        #[arg(long, value_delimiter = ',', value_name = "GLOB")]
+        exclude: Vec<String>,
+        /// A01.5: archivo de patrones de ignorado (uno por línea; # comenta).
+        #[arg(long, value_name = "PATH")]
+        ignore_file: Option<String>,
+        /// A01.5: seguir symlinks a directorios (default: no; los symlinks a
+        /// archivos fuente sí se leen siempre).
+        #[arg(long)]
+        follow_symlinks: bool,
+        /// A01.5: incluir archivos y directorios ocultos (default: no).
+        #[arg(long)]
+        include_hidden: bool,
         /// Perfil de reglas sin --enable: `default` (catálogo del producto) o
         /// `local` (estado toggled en la base local del usuario).
         #[arg(long, value_name = "PERFIL", default_value = "default")]
@@ -158,28 +179,38 @@ fn run(cli: Cli) -> Result<i32> {
             error_pct,
             enable,
             disable,
+            include,
+            exclude,
+            ignore_file,
+            follow_symlinks,
+            include_hidden,
             rules_profile,
             rules_csv,
             record_history,
             retain_sensitive_evidence,
             db,
             pdf,
-        } => cmd_scan(
+        } => cmd_scan(ScanOptions {
             path,
             file,
-            &format,
+            format,
             max_errors,
             max_warnings,
             error_pct,
-            &enable,
-            &disable,
-            &rules_profile,
-            rules_csv.as_deref(),
+            enable,
+            disable,
+            include,
+            exclude,
+            ignore_file: ignore_file.map(PathBuf::from),
+            follow_symlinks,
+            include_hidden,
+            profile: rules_profile,
+            rules_csv,
             record_history,
             retain_sensitive_evidence,
-            db.as_deref(),
-            pdf.as_deref(),
-        ),
+            db,
+            pdf,
+        }),
         Commands::Rules { action } => cmd_rules(action),
         Commands::ExportPdf { result_file, out } => cmd_export_pdf(&result_file, &out),
     }
@@ -234,29 +265,58 @@ fn effective_rules(
     Ok(out)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn cmd_scan(
+/// Opciones resueltas de `gx scan` (evita el exceso de argumentos posicionales).
+struct ScanOptions {
     path: Option<String>,
     file: Option<String>,
-    format: &str,
+    format: String,
     max_errors: u32,
     max_warnings: u32,
     error_pct: Option<f32>,
-    enable: &[String],
-    disable: &[String],
-    profile: &str,
-    rules_csv: Option<&str>,
+    enable: Vec<String>,
+    disable: Vec<String>,
+    include: Vec<String>,
+    exclude: Vec<String>,
+    ignore_file: Option<PathBuf>,
+    follow_symlinks: bool,
+    include_hidden: bool,
+    profile: String,
+    rules_csv: Option<String>,
     record_history: bool,
     retain_sensitive_evidence: bool,
-    db: Option<&str>,
-    pdf: Option<&str>,
-) -> Result<i32> {
+    db: Option<String>,
+    pdf: Option<String>,
+}
+
+fn cmd_scan(options: ScanOptions) -> Result<i32> {
+    let ScanOptions {
+        path,
+        file,
+        format,
+        max_errors,
+        max_warnings,
+        error_pct,
+        enable,
+        disable,
+        include,
+        exclude,
+        ignore_file,
+        follow_symlinks,
+        include_hidden,
+        profile,
+        rules_csv,
+        record_history,
+        retain_sensitive_evidence,
+        db,
+        pdf,
+    } = options;
+
     // Invocación inválida: sin path (código 2).
     let Some(path_str) = path.or(file) else {
         eprintln!("[gx] falta la ruta: `gx scan <ruta>` o `gx scan --file <ruta>`");
         return Ok(EXIT_INVALID);
     };
-    if !matches!(format, "text" | "json" | "ndjson") {
+    if !matches!(format.as_str(), "text" | "json" | "ndjson") {
         eprintln!("[gx] formato inválido '{format}' (esperado text|json|ndjson)");
         return Ok(EXIT_INVALID);
     }
@@ -264,7 +324,7 @@ fn cmd_scan(
 
     // A01: un --disable de una regla inexistente es un error de invocación,
     // no un no-op silencioso.
-    for id in disable {
+    for id in &disable {
         let id = id.trim();
         if !gx_engine::runtime::is_known_rule(id) {
             eprintln!("[gx] regla desconocida en --disable: '{id}'");
@@ -279,14 +339,28 @@ fn cmd_scan(
             max_warnings,
         },
     };
+    let discovery = gx_core::models::DiscoveryPolicy {
+        include,
+        exclude,
+        ignore_file,
+        follow_symlinks,
+        include_hidden,
+    };
 
     let request = AnalysisRequest {
         schema_version: 1,
         inputs: vec![path.clone()],
-        enabled_rule_ids: effective_rules(rules_csv, profile, db, enable, disable)?,
+        enabled_rule_ids: effective_rules(
+            rules_csv.as_deref(),
+            &profile,
+            db.as_deref(),
+            &enable,
+            &disable,
+        )?,
         policy,
         record_history,
         retain_sensitive_evidence,
+        discovery,
     };
 
     // A01/F01: la validación compartida rechaza esquema, reglas y política
@@ -301,12 +375,12 @@ fn cmd_scan(
     // Historial opt-in (GX-011/GX-013: CI no escribe).
     if record_history {
         let run = gx_storage::dao::audit_dao::AuditRun::from_analysis(&request, &result, "cli");
-        let mut conn = open_db(db)?;
+        let mut conn = open_db(db.as_deref())?;
         gx_storage::dao::audit_dao::persist_run(&mut conn, &run, &result.findings)?;
     }
 
     // GX-019: PDF opcional; un fallo del PDF NUNCA altera el veredicto.
-    if let Some(pdf_path) = pdf {
+    if let Some(pdf_path) = pdf.as_deref() {
         if let Err(e) = gx_report::render(&result, std::path::Path::new(pdf_path)) {
             eprintln!("[gx] aviso: no se pudo generar el PDF '{pdf_path}': {e:#}");
         }
@@ -317,7 +391,7 @@ fn cmd_scan(
         eprintln!("[gx] FALLO {}: {}", f.path.display(), f.error);
     }
 
-    match format {
+    match format.as_str() {
         "json" => {
             // STDOUT = un documento JSON completo; progreso/errores a stderr.
             // C01: el framing de `json` NO cambia.

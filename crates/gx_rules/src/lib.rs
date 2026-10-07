@@ -1,4 +1,4 @@
-//! gx_rules — catálogo de reglas (trait Rule + registro + 30 reglas).
+//! gx_rules — catálogo de reglas (trait Rule + registro + 34 reglas).
 //! Port de `gx_linter/app/rules/*`.
 #![allow(unused_variables)]
 // The `define_rule!` macro emits code that trips these clippy lints by design.
@@ -16,7 +16,7 @@ pub mod rules;
 use base::Rule;
 pub use base::RuleDescriptor;
 
-/// Catálogo ESTÁTICO de las 30 reglas (24 concretas + 6 abstractas) (B02).
+/// Catálogo ESTÁTICO de las 34 reglas (28 concretas + 6 abstractas) (B02).
 ///
 /// Los metadatos y las factories viven aquí; instanciar es una decisión
 /// explícita del engine (sólo reglas seleccionadas).
@@ -62,7 +62,7 @@ pub fn catalog() -> &'static [RuleDescriptor] {
     CATALOG
 }
 
-/// Instancia las 30 reglas (compatibilidad con consumidores de metadatos y
+/// Instancia las 34 reglas (compatibilidad con consumidores de metadatos y
 /// tests que necesitan objetos reales).
 pub fn all_rules() -> Vec<Box<dyn Rule>> {
     CATALOG

@@ -12,8 +12,9 @@ const MIGRATION_V2: &str = include_str!("../../../migrations/V002__seed_rules_an
 const MIGRATION_V3: &str = include_str!("../../../migrations/V003__audit_object_identity.sql");
 const MIGRATION_V4: &str = include_str!("../../../migrations/V004__audit_security_metadata.sql");
 const MIGRATION_V5: &str = include_str!("../../../migrations/V005__audit_trace.sql");
+const MIGRATION_V6: &str = include_str!("../../../migrations/V006__audit_run_snapshot.sql");
 
-/// Todas las migraciones, en orden (V001→V005).
+/// Todas las migraciones, en orden (V001→V006).
 pub fn all_migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_V1),
@@ -21,6 +22,7 @@ pub fn all_migrations() -> Migrations<'static> {
         M::up(MIGRATION_V3),
         M::up(MIGRATION_V4),
         M::up(MIGRATION_V5),
+        M::up(MIGRATION_V6),
     ])
 }
 
@@ -146,7 +148,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// GX-011: migrar una base existente (V1→V3) preserva los datos del
+    /// GX-011/C01: migrar una base existente (V1→V6) preserva los datos del
     /// usuario.
     #[test]
     fn migration_preserves_existing_data() {
@@ -171,7 +173,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        // Apertura actual: agrega V3 sin borrar datos.
+        // Apertura actual: agrega V3..V6 sin borrar datos.
         let conn = init_db_at(&db).unwrap();
         let raw_id: String = conn
             .query_row("SELECT raw_id FROM rules WHERE id='GX.2.3'", [], |r| {
@@ -190,6 +192,13 @@ mod tests {
             .prepare("SELECT category, confidence, cwe FROM audit_issues LIMIT 0")
             .is_ok();
         assert!(has_security, "las columnas V004 (D03) deben existir");
+        let has_snapshot: bool = conn
+            .prepare(
+                "SELECT scanned_files, completion, coverage_json, request_json, \
+                 parser_version, schema_version FROM audit_runs LIMIT 0",
+            )
+            .is_ok();
+        assert!(has_snapshot, "las columnas V006 (C01) deben existir");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

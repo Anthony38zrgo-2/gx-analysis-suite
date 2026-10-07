@@ -10,7 +10,9 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use gx_core::budget::ExecutionBudget;
-use gx_core::models::{AnalysisRequest, AuditContext, Issue, QgPolicy, QgVerdict, ScanCompletion};
+use gx_core::models::{
+    AnalysisRequest, AuditContext, DiscoveryPolicy, Issue, QgPolicy, QgVerdict, ScanCompletion,
+};
 use gx_engine::runtime::{analyze, analyze_with_options, scan_file, validate_request, RulePlan};
 
 fn fixtures(name: &str) -> PathBuf {
@@ -38,6 +40,7 @@ fn request(inputs: Vec<PathBuf>, rules: Vec<String>) -> AnalysisRequest {
         },
         record_history: false,
         retain_sensitive_evidence: false,
+        discovery: Default::default(),
     }
 }
 
@@ -222,6 +225,52 @@ fn findings_limit_is_partial_and_bounded() {
     );
 }
 
+/// A04/§5: el presupuesto de findings es de CORRIDA (varios archivos), no
+/// sólo por archivo, y el corte en borde de chunk es determinista.
+#[test]
+fn findings_limit_is_run_wide_and_deterministic() {
+    let dir = tmp_dir("gx_engine_run_wide_findings");
+    for index in 0..3 {
+        let file = dir.join(format!("dense_{index}.txt"));
+        let mut text = String::new();
+        for _ in 0..50 {
+            text.push_str("for each Customer\n    where CustomerName = 'Admin'\nendfor\n");
+        }
+        std::fs::write(&file, text).unwrap();
+    }
+    let req = request(vec![dir.clone()], default_rules());
+    let budget = ExecutionBudget {
+        max_findings: 60,
+        ..Default::default()
+    };
+    let first = analyze_with_options(&req, None, None, &budget);
+    assert_eq!(first.completion, ScanCompletion::Partial);
+    assert_eq!(first.verdict, QgVerdict::Error);
+    assert!(
+        first.findings.len() < 150,
+        "el límite de corrida corta antes de retener todos los archivos: {}",
+        first.findings.len()
+    );
+    assert!(
+        first
+            .failures
+            .iter()
+            .any(|f| f.error.contains("de la corrida")),
+        "failure de límite global: {:?}",
+        first.failures
+    );
+
+    let second = analyze_with_options(&req, None, None, &budget);
+    let key = |r: &gx_core::models::AnalysisResult| {
+        r.findings
+            .iter()
+            .map(|i| (i.rule_id.clone(), i.line_number, i.file_path.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(key(&first), key(&second), "el corte es determinista");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A04/F08: cancelación previa → `cancelled`, nunca un escaneo limpio.
 #[test]
 fn preset_cancellation_is_cancelled() {
@@ -321,4 +370,129 @@ fn evidence_preserves_string_with_comment_markers() {
         "la evidencia es el texto ORIGINAL, no la vista enmascarada"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A01.5: `include`/`exclude` globs restringen el discovery de directorios.
+#[test]
+fn discovery_globs_restrict_directory_scan() {
+    let dir = tmp_dir("gx_engine_discovery_globs");
+    std::fs::copy(fixtures("sources/clean_object.txt"), dir.join("keep.txt")).unwrap();
+    std::fs::copy(fixtures("sources/clean_object.txt"), dir.join("skip.txt")).unwrap();
+
+    let mut req = request(vec![dir.clone()], default_rules());
+    req.discovery.include = vec!["keep*".to_string()];
+    let r = analyze(&req);
+    assert_eq!(r.scanned_files, 1, "failures: {:?}", r.failures);
+    assert_eq!(r.verdict, QgVerdict::Pass);
+    assert!(r.coverage.files_excluded >= 1, "{:?}", r.coverage);
+
+    req.discovery.include.clear();
+    req.discovery.exclude = vec!["skip.txt".to_string()];
+    let r = analyze(&req);
+    assert_eq!(r.scanned_files, 1, "failures: {:?}", r.failures);
+    assert_eq!(r.verdict, QgVerdict::Pass);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A01.5: el archivo de ignorado se aplica; si falta, el request es inválido
+/// (nunca un PASS sin calificar).
+#[test]
+fn ignore_file_is_honored_and_missing_file_is_invalid() {
+    let dir = tmp_dir("gx_engine_discovery_ignore");
+    std::fs::copy(fixtures("sources/clean_object.txt"), dir.join("keep.txt")).unwrap();
+    std::fs::copy(fixtures("sources/clean_object.txt"), dir.join("drop.txt")).unwrap();
+    let ignore = dir.join("gx.ignore");
+    std::fs::write(&ignore, "# comentario\ndrop.txt\n").unwrap();
+
+    let mut req = request(vec![dir.clone()], default_rules());
+    req.discovery.ignore_file = Some(ignore);
+    let r = analyze(&req);
+    assert_eq!(r.scanned_files, 1, "failures: {:?}", r.failures);
+    assert_eq!(r.verdict, QgVerdict::Pass);
+
+    req.discovery.ignore_file = Some(dir.join("no-existe.ignore"));
+    let err = validate_request(&req).unwrap_err();
+    assert_eq!(err.code, "invalid_discovery");
+    let r = analyze(&req);
+    assert_eq!(r.verdict, QgVerdict::Error);
+    assert_eq!(r.scanned_files, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A01.5: un glob inválido falla en la validación compartida, antes del scan.
+#[test]
+fn invalid_discovery_glob_is_rejected() {
+    let clean = fixtures("sources/clean_object.txt");
+    let mut req = request(vec![clean], default_rules());
+    req.discovery.include = vec!["[bad".to_string()];
+    let err = validate_request(&req).unwrap_err();
+    assert_eq!(err.code, "invalid_discovery");
+    let r = analyze(&req);
+    assert_eq!(r.verdict, QgVerdict::Error);
+    assert_eq!(r.scanned_files, 0);
+    assert!(
+        r.failures[0].error.contains("glob inválido"),
+        "{:?}",
+        r.failures
+    );
+}
+
+/// A01.5: ocultos excluidos por defecto e incluidos con `include_hidden`.
+#[test]
+fn hidden_discovery_follows_the_policy() {
+    let dir = tmp_dir("gx_engine_discovery_hidden");
+    std::fs::create_dir_all(dir.join(".oculto")).unwrap();
+    std::fs::write(
+        dir.join(".oculto/inner.txt"),
+        std::fs::read_to_string(fixtures("sources/clean_object.txt")).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".hidden.txt"),
+        std::fs::read_to_string(fixtures("sources/clean_object.txt")).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("visible.txt"),
+        std::fs::read_to_string(fixtures("sources/clean_object.txt")).unwrap(),
+    )
+    .unwrap();
+
+    let req = request(vec![dir.clone()], default_rules());
+    let r = analyze(&req);
+    assert_eq!(r.scanned_files, 1, "failures: {:?}", r.failures);
+
+    let mut req = req;
+    req.discovery.include_hidden = true;
+    let r = analyze(&req);
+    assert_eq!(r.scanned_files, 3, "failures: {:?}", r.failures);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A01.5: la política aplica al discovery; un archivo explícito sólo se
+/// valida por extensión (no lo filtran los globs).
+#[test]
+fn explicit_file_input_is_not_filtered_by_globs() {
+    let file = fixtures("sources/clean_object.txt");
+    let mut req = request(vec![file], default_rules());
+    req.discovery.exclude = vec!["**".to_string()];
+    let r = analyze(&req);
+    assert_eq!(r.scanned_files, 1, "failures: {:?}", r.failures);
+    assert_eq!(r.verdict, QgVerdict::Pass);
+}
+
+/// A01.5: la política por defecto no se serializa (omitida del contrato).
+#[test]
+fn default_discovery_policy_is_omitted_from_json() {
+    let req = request(vec![PathBuf::from("x.txt")], vec!["GX.1.1".to_string()]);
+    let json = serde_json::to_value(&req).unwrap();
+    assert!(json.get("discovery").is_none(), "{json}");
+
+    let mut custom = req;
+    custom.discovery = DiscoveryPolicy {
+        exclude: vec!["generated/**".to_string()],
+        ..Default::default()
+    };
+    let json = serde_json::to_value(&custom).unwrap();
+    assert_eq!(json["discovery"]["exclude"][0], "generated/**");
 }

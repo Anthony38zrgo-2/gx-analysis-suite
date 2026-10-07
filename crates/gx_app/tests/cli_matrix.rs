@@ -666,3 +666,58 @@ fn export_pdf_from_scan_json() {
     assert_eq!(out.code, 3);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A01.5: `--exclude` y `--ignore-file` restringen el discovery del CLI;
+/// un glob inválido o un ignore-file faltante son invocación inválida (2).
+#[test]
+fn discovery_policy_flags_apply_and_fail_fast() {
+    let dir = std::env::temp_dir().join("gx_cli_discovery_policy");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let clean = fixtures("sources/clean_object.txt");
+    std::fs::copy(&clean, dir.join("keep.txt")).unwrap();
+    std::fs::copy(&clean, dir.join("skip.txt")).unwrap();
+    let ignore = dir.join("gx.ignore");
+    std::fs::write(&ignore, "# ignora el archivo skip\nskip.txt\n").unwrap();
+
+    let out = gx(&[
+        "scan",
+        dir.to_str().unwrap(),
+        "--exclude",
+        "skip.txt",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let json: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(json["scanned_files"], 1);
+    assert_eq!(json["request"]["discovery"]["exclude"][0], "skip.txt");
+
+    let out = gx(&[
+        "scan",
+        dir.to_str().unwrap(),
+        "--ignore-file",
+        ignore.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let json: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(json["scanned_files"], 1);
+
+    // Glob inválido: error de invocación ANTES de escanear (exit 2).
+    let out = gx(&["scan", dir.to_str().unwrap(), "--include", "[bad"]);
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("glob inválido"), "{}", out.stderr);
+
+    // Ignore-file inexistente: error de invocación (exit 2).
+    let out = gx(&[
+        "scan",
+        dir.to_str().unwrap(),
+        "--ignore-file",
+        "no-existe.ignore",
+    ]);
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("no se pudo leer"), "{}", out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -245,6 +245,49 @@ pub enum QgVerdict {
     Error,
 }
 
+/// A01.5: política explícita de descubrimiento de fuentes.
+///
+/// Los patrones son globs relativos al root escaneado con separador `/`
+/// (p. ej. `**/*.xpz`, `Rules/**`). `include` vacío acepta toda extensión
+/// fuente soportada; `exclude` domina sobre `include`. El `ignore_file`
+/// aporta patrones adicionales (uno por línea; `#` comenta) con la misma
+/// semántica que `exclude`. La extensión fuente sigue siendo un requisito
+/// base: un patrón de `include` no habilita extensiones ajenas. La política
+/// aplica al discovery de directorios; un archivo pasado explícitamente como
+/// input sólo se valida por extensión.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DiscoveryPolicy {
+    /// Globs de inclusión; vacío = todos los archivos fuente.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    /// Globs de exclusión; dominan sobre `include`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// Archivo de patrones de ignorado (uno por línea, `#` comenta).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignore_file: Option<PathBuf>,
+    /// `false` (default): los symlinks a directorios NO se recorren; los
+    /// symlinks a archivos fuente sí se leen. Los ciclos se reportan como
+    /// errores de discovery. `true` sigue symlinks de directorio.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub follow_symlinks: bool,
+    /// `false` (default): archivos y directorios ocultos (`.nombre`) se
+    /// excluyen del discovery.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub include_hidden: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl DiscoveryPolicy {
+    /// `true` si es la política por defecto (para omisiones de contrato).
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Solicitud de análisis serializable (GX-010).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnalysisRequest {
@@ -262,6 +305,9 @@ pub struct AnalysisRequest {
     /// valores secretos se redactan siempre en la evidencia emitida.
     #[serde(default)]
     pub retain_sensitive_evidence: bool,
+    /// A01.5: política explícita de discovery (include/exclude/ignore/symlinks).
+    #[serde(default, skip_serializing_if = "DiscoveryPolicy::is_default")]
+    pub discovery: DiscoveryPolicy,
 }
 
 /// Fallo de scan de un input concreto (nunca se reporta como escaneo limpio).
@@ -302,6 +348,18 @@ pub enum ScanCompletion {
     Cancelled,
     /// Fallo de infraestructura o de validación del request.
     Failed,
+}
+
+impl ScanCompletion {
+    /// Nombre estable del estado (mismo que su serialización snake_case).
+    pub fn name(&self) -> &'static str {
+        match self {
+            ScanCompletion::Complete => "complete",
+            ScanCompletion::Partial => "partial",
+            ScanCompletion::Cancelled => "cancelled",
+            ScanCompletion::Failed => "failed",
+        }
+    }
 }
 
 /// Cobertura de un pack semántico/seguridad (D01): qué se analizó, qué se

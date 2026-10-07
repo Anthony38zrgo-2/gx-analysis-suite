@@ -1,7 +1,11 @@
 //! Audit run / issue history DAO.
 
+use std::io::Read;
+use std::path::PathBuf;
+
 use rusqlite::Connection;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use gx_core::models::Issue;
 
@@ -12,6 +16,7 @@ use crate::Result;
 pub struct AuditRun {
     pub file_path: String,
     pub file_name: String,
+    /// C01: digest de la fuente (ver [`source_digest`]).
     pub file_hash: Option<String>,
     pub file_size_bytes: Option<i64>,
     pub triggered_by: String,
@@ -30,6 +35,64 @@ pub struct AuditRun {
     pub verdict: Option<String>,
     /// GX-011: fallos de scan serializados (JSON).
     pub failures_json: Option<String>,
+    /// C01: archivos REALMENTE escaneados (no los declarados).
+    pub scanned_files: Option<i64>,
+    /// C01: completitud (`complete`/`partial`/`cancelled`/`failed`).
+    pub completion: Option<String>,
+    /// C01: `ScanCoverage` serializada.
+    pub coverage_json: Option<String>,
+    /// C01: configuración efectiva completa (`AnalysisRequest` serializado).
+    pub request_json: Option<String>,
+    /// C01: versión del parser semántico (`gx_core::semantics`).
+    pub parser_version: Option<String>,
+    /// C01: versión del contrato del resultado.
+    pub schema_version: Option<i64>,
+}
+
+/// C01: digest de la fuente declarada.
+///
+/// - Un único input archivo: SHA-256 del contenido, leído por bloques.
+/// - Múltiples inputs o directorios: SHA-256 de la identidad declarada
+///   (ruta canónica + tamaño/mtime de cada input, en orden) sin recorrer el
+///   árbol; el contenido de cada archivo se verifica en la capa de fuente
+///   (`source_modified` del visor, C02).
+pub fn source_digest(inputs: &[PathBuf]) -> Option<String> {
+    match inputs {
+        [single] if single.is_file() => digest_file(single),
+        _ => digest_declared_inputs(inputs),
+    }
+}
+
+fn digest_file(path: &std::path::Path) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+fn digest_declared_inputs(inputs: &[PathBuf]) -> Option<String> {
+    let mut hasher = Sha256::new();
+    for input in inputs {
+        let canonical = input.canonicalize().unwrap_or_else(|_| input.clone());
+        hasher.update(canonical.to_string_lossy().as_bytes());
+        hasher.update([0u8]);
+        if let Ok(metadata) = std::fs::metadata(input) {
+            hasher.update(metadata.len().to_le_bytes());
+            if let Ok(modified) = metadata.modified() {
+                if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+                    hasher.update(duration.as_nanos().to_le_bytes());
+                }
+            }
+        }
+    }
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 impl AuditRun {
@@ -63,7 +126,7 @@ impl AuditRun {
         AuditRun {
             file_path,
             file_name,
-            file_hash: None,
+            file_hash: source_digest(&request.inputs),
             file_size_bytes,
             triggered_by: triggered_by.to_string(),
             total_findings: result.metrics.total_findings as i64,
@@ -89,6 +152,14 @@ impl AuditRun {
             } else {
                 serde_json::to_string(&result.failures).ok()
             },
+            // C01: snapshot completo para distinguir corridas incompletas y
+            // reproducir la configuración efectiva.
+            scanned_files: Some(result.scanned_files as i64),
+            completion: Some(result.completion.name().to_string()),
+            coverage_json: serde_json::to_string(&result.coverage).ok(),
+            request_json: serde_json::to_string(request).ok(),
+            parser_version: Some(gx_core::semantics::PARSER_VERSION.to_string()),
+            schema_version: Some(result.schema_version as i64),
         }
     }
 }
@@ -100,9 +171,10 @@ pub fn insert_run(conn: &Connection, run: &AuditRun) -> Result<i64> {
          (file_path, file_name, file_hash, file_size_bytes, triggered_by, \
           total_findings, errors, warnings, info, qg_passed, qg_threshold_pct, \
           duration_ms, pdf_path, engine_version, policy, verdict, failures_json, \
-          finished_at) \
+          scanned_files, completion, coverage_json, request_json, parser_version, \
+          schema_version, finished_at) \
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17, \
-                 strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                 ?18,?19,?20,?21,?22,?23, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
         rusqlite::params![
             &run.file_path,
             &run.file_name,
@@ -121,6 +193,12 @@ pub fn insert_run(conn: &Connection, run: &AuditRun) -> Result<i64> {
             &run.policy,
             &run.verdict,
             &run.failures_json,
+            &run.scanned_files,
+            &run.completion,
+            &run.coverage_json,
+            &run.request_json,
+            &run.parser_version,
+            &run.schema_version,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -205,6 +283,10 @@ pub struct AuditRunSummary {
     pub verdict: Option<String>,
     pub policy: Option<String>,
     pub qg_passed: bool,
+    /// C01: completitud de la corrida (`complete`/`partial`/`cancelled`/`failed`).
+    pub completion: Option<String>,
+    /// C01: archivos realmente escaneados (0 en filas anteriores a V006).
+    pub scanned_files: i64,
 }
 
 /// Most recent runs, newest first.
@@ -376,12 +458,12 @@ pub fn list_runs_page(
     let sql = match before_id {
         Some(_) => {
             "SELECT id, file_path, file_name, started_at, total_findings, errors, warnings, info, \
-                    verdict, policy, qg_passed \
+                    verdict, policy, qg_passed, completion, scanned_files \
              FROM audit_runs WHERE id < ?1 ORDER BY id DESC LIMIT ?2"
         }
         None => {
             "SELECT id, file_path, file_name, started_at, total_findings, errors, warnings, info, \
-                    verdict, policy, qg_passed \
+                    verdict, policy, qg_passed, completion, scanned_files \
              FROM audit_runs ORDER BY id DESC LIMIT ?1"
         }
     };
@@ -399,6 +481,8 @@ pub fn list_runs_page(
             verdict: r.get(8)?,
             policy: r.get(9)?,
             qg_passed: r.get::<_, Option<bool>>(10)?.unwrap_or(false),
+            completion: r.get(11)?,
+            scanned_files: r.get::<_, Option<i64>>(12)?.unwrap_or(0),
         })
     };
     let mut out = Vec::new();
@@ -622,6 +706,151 @@ mod tests {
         assert_eq!(second.len(), 2);
         assert_eq!(second[0].id, ids[2]);
         assert!(second.iter().all(|r| r.id < first[1].id));
+    }
+
+    /// C01: `from_analysis` preserva configuración efectiva, cobertura,
+    /// completitud, conteo real de archivos y versiones.
+    #[test]
+    fn from_analysis_captures_full_snapshot() {
+        use gx_core::models::{
+            AnalysisRequest, AnalysisResult, AuditMetrics, DiscoveryPolicy, QgPolicy, QgVerdict,
+            ScanCompletion, ScanCoverage,
+        };
+
+        let request = AnalysisRequest {
+            schema_version: 1,
+            inputs: vec![PathBuf::from("sample.xpz")],
+            enabled_rule_ids: vec!["GX.1.1".to_string(), "GX.2.6".to_string()],
+            policy: QgPolicy::Percentage {
+                max_error_pct: 10.0,
+            },
+            record_history: true,
+            retain_sensitive_evidence: false,
+            discovery: DiscoveryPolicy::default(),
+        };
+        let coverage = ScanCoverage {
+            inputs_declared: 1,
+            inputs_scanned: 1,
+            files_discovered: 7,
+            files_excluded: 2,
+            files_deduplicated: 0,
+            source_free_inputs: 0,
+        };
+        let result = AnalysisResult {
+            schema_version: 1,
+            request: request.clone(),
+            scanned_files: 3,
+            findings: Vec::new(),
+            metrics: AuditMetrics::default(),
+            failures: Vec::new(),
+            policy: request.policy.clone(),
+            verdict: QgVerdict::Reject,
+            coverage: coverage.clone(),
+            completion: ScanCompletion::Partial,
+            pack_coverage: Vec::new(),
+            security: None,
+        };
+
+        let run = AuditRun::from_analysis(&request, &result, "cli");
+        assert_eq!(run.scanned_files, Some(3), "conteo real, no declarado");
+        assert_eq!(run.completion.as_deref(), Some("partial"));
+        assert_eq!(run.schema_version, Some(1));
+        assert_eq!(
+            run.parser_version.as_deref(),
+            Some(gx_core::semantics::PARSER_VERSION)
+        );
+        let stored_coverage: ScanCoverage =
+            serde_json::from_str(run.coverage_json.as_deref().unwrap()).unwrap();
+        assert_eq!(stored_coverage.files_discovered, 7);
+        let stored_request: AnalysisRequest =
+            serde_json::from_str(run.request_json.as_deref().unwrap()).unwrap();
+        assert_eq!(stored_request.enabled_rule_ids, request.enabled_rule_ids);
+        assert!(run.file_hash.is_some(), "digest de la fuente declarada");
+    }
+
+    /// C01: el resumen de historial expone completitud y archivos escaneados,
+    /// y la fila conserva configuración/cobertura completas.
+    #[test]
+    fn history_summary_exposes_completion_and_scanned_files() {
+        use gx_core::models::{
+            AnalysisRequest, AnalysisResult, AuditMetrics, DiscoveryPolicy, QgPolicy, QgVerdict,
+            ScanCompletion, ScanCoverage,
+        };
+
+        let request = AnalysisRequest {
+            schema_version: 1,
+            inputs: vec![PathBuf::from("sample.xpz")],
+            enabled_rule_ids: vec!["GX.1.1".to_string()],
+            policy: QgPolicy::Absolute {
+                max_errors: 0,
+                max_warnings: 999_999,
+            },
+            record_history: true,
+            retain_sensitive_evidence: false,
+            discovery: DiscoveryPolicy::default(),
+        };
+        let result = AnalysisResult {
+            schema_version: 1,
+            request: request.clone(),
+            scanned_files: 9,
+            findings: Vec::new(),
+            metrics: AuditMetrics::default(),
+            failures: Vec::new(),
+            policy: request.policy.clone(),
+            verdict: QgVerdict::Error,
+            coverage: ScanCoverage {
+                inputs_declared: 1,
+                inputs_scanned: 1,
+                files_discovered: 9,
+                files_excluded: 0,
+                files_deduplicated: 0,
+                source_free_inputs: 0,
+            },
+            completion: ScanCompletion::Failed,
+            pack_coverage: Vec::new(),
+            security: None,
+        };
+
+        let mut conn = crate::db::init_memory_db().unwrap();
+        let run = AuditRun::from_analysis(&request, &result, "desktop");
+        let run_id = persist_run(&mut conn, &run, &[]).unwrap();
+
+        let runs = list_runs_page(&conn, None, 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, run_id);
+        assert_eq!(runs[0].completion.as_deref(), Some("failed"));
+        assert_eq!(runs[0].scanned_files, 9);
+
+        let (request_json, coverage_json): (String, String) = conn
+            .query_row(
+                "SELECT request_json, coverage_json FROM audit_runs WHERE id = ?1",
+                [run_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(request_json.contains("GX.1.1"));
+        assert!(coverage_json.contains("\"files_discovered\":9"));
+    }
+
+    /// C01: el digest de un archivo único es el SHA-256 de su contenido.
+    #[test]
+    fn source_digest_of_single_file_hashes_content() {
+        let dir = std::env::temp_dir().join("gx_storage_digest");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"abc").unwrap();
+        assert_eq!(
+            source_digest(std::slice::from_ref(&file)).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let changed = dir.join("b.txt");
+        std::fs::write(&changed, b"abd").unwrap();
+        assert_ne!(
+            source_digest(std::slice::from_ref(&changed)).unwrap(),
+            source_digest(std::slice::from_ref(&file)).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// GX-011: si falla la inserción de issues, la corrida COMPLETA se
